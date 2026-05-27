@@ -94,6 +94,7 @@ struct chordism_instance_t {
     float release;       /* 0..1 */
     float volume;        /* 0..1 */
     int   waveform;      /* 0..NUM_WAVEFORMS-1 */
+    float shape;         /* 0..1 — per-waveform variable attribute */
 
     Voice voices[NUM_VOICES];
     int next_chord_base;   /* 0 or CHORD_SIZE — round-robin between voice banks */
@@ -138,28 +139,60 @@ static float poly_blep(float t, float dt) {
     return 0.0f;
 }
 
-static float osc_sample(int waveform, float phase, float phase_inc) {
-    switch (waveform) {
-        case WAVE_SINE:
-            return sinf(TWO_PI * phase);
+/* Reflective wavefolder — folds input back across [-1, +1] (Buchla style). */
+static float wavefold(float x) {
+    /* Iterative reflection; bounded loop count for safety. */
+    for (int i = 0; i < 8; ++i) {
+        if (x > 1.0f)       x = 2.0f - x;
+        else if (x < -1.0f) x = -2.0f - x;
+        else break;
+    }
+    return x;
+}
 
-        case WAVE_TRIANGLE:
-            /* Triangle's harmonics roll off as 1/n^2 — aliasing is
-             * inaudible at audio rates. Compute directly. */
-            return 4.0f * fabsf(phase - 0.5f) - 1.0f;
+static float osc_sample(int waveform, float phase, float phase_inc, float shape) {
+    switch (waveform) {
+        case WAVE_SINE: {
+            /* shape drives a wavefolder. gain ramps from 1 (no fold) to 6
+             * (heavy fold, complex harmonics). */
+            float gain = 1.0f + shape * 5.0f;
+            return wavefold(gain * sinf(TWO_PI * phase));
+        }
+
+        case WAVE_TRIANGLE: {
+            /* shape tilts the triangle toward sawtooth. peak position
+             * moves from 0.5 (centered tri) to 1e-4 (falling saw). */
+            float peak = 0.5f * (1.0f - shape);
+            if (peak < 1e-4f) peak = 1e-4f;
+            if (phase < peak) {
+                return (phase / peak) * 2.0f - 1.0f;
+            }
+            return 1.0f - ((phase - peak) / (1.0f - peak)) * 2.0f;
+        }
 
         case WAVE_SAW: {
+            /* Fundamental saw plus an octave-up saw, crossfaded by shape.
+             * shape=0: pure fundamental. shape=1: pure octave. */
             float s = 2.0f * phase - 1.0f;
             s -= poly_blep(phase, phase_inc);
+
+            if (shape > 0.0f) {
+                float p2 = phase * 2.0f;
+                if (p2 >= 1.0f) p2 -= 1.0f;
+                float s2 = 2.0f * p2 - 1.0f;
+                s2 -= poly_blep(p2, phase_inc * 2.0f);
+                s = s * (1.0f - shape) + s2 * shape;
+            }
             return s;
         }
 
         case WAVE_SQUARE: {
-            /* Two discontinuities per cycle (phase=0 rising, phase=0.5
-             * falling). PolyBLEP at each with opposite signs. */
-            float t2 = phase + 0.5f;
+            /* shape controls pulse width: 0 → 5%, 0.5 → 50%, 1 → 95%. */
+            float pw = 0.05f + shape * 0.9f;
+            float t2 = phase + (1.0f - pw);
             if (t2 >= 1.0f) t2 -= 1.0f;
-            float s = (phase < 0.5f) ? 1.0f : -1.0f;
+
+            float s = (phase < pw) ? 1.0f : -1.0f;
             s += poly_blep(phase, phase_inc);
             s -= poly_blep(t2, phase_inc);
             return s;
@@ -252,6 +285,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->release = 0.30f;
     inst->volume = 0.80f;
     inst->waveform = WAVE_SINE;
+    inst->shape = 0.0f;
 
     for (int i = 0; i < NUM_VOICES; ++i) {
         inst->voices[i].env.stage = ENV_IDLE;
@@ -309,6 +343,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (w >= NUM_WAVEFORMS) w = NUM_WAVEFORMS - 1;
             inst->waveform = w;
         }
+    } else if (strcmp(key, "shape") == 0) {
+        inst->shape = param_from_string(val, inst->shape);
     }
 }
 
@@ -324,8 +360,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->volume);
     } else if (key && strcmp(key, "waveform") == 0) {
         return snprintf(buf, buf_len, "%d", inst->waveform);
+    } else if (key && strcmp(key, "shape") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->shape);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.4");
+        return snprintf(buf, buf_len, "0.0.5");
     }
     buf[0] = '\0';
     return 0;
@@ -388,7 +426,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             if (!v->active) continue;
 
-            float s = osc_sample(inst->waveform, v->phase, v->phase_inc);
+            float s = osc_sample(inst->waveform, v->phase, v->phase_inc, inst->shape);
             v->phase += v->phase_inc;
             if (v->phase >= 1.0f) v->phase -= 1.0f;
 
