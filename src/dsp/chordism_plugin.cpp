@@ -107,6 +107,20 @@ static const float ENV_SILENCE = 1e-4f;
  * sharp of voice 0 at full detune. */
 static const float MAX_DETUNE_CENTS = 50.0f;
 
+/* Filter cutoff range, exp-mapped 0..1 → 20 Hz .. ~Nyquist (clamped just
+ * under SAMPLE_RATE/2 for SVF stability). */
+static const float FILTER_CUTOFF_MIN_HZ = 20.0f;
+static const float FILTER_CUTOFF_MAX_HZ = 20000.0f;
+/* Internal q range (Chamberlin: smaller q ↔ more resonance). 0.05 self-
+ * oscillates; clamp to 0.10 minimum. 1.41 ≈ Butterworth Q. */
+static const float FILTER_Q_MAX = 1.41f;
+static const float FILTER_Q_MIN = 0.10f;
+
+struct SVF {
+    float low;
+    float band;
+};
+
 enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
 
 enum Waveform { WAVE_SINE = 0, WAVE_TRIANGLE = 1, WAVE_SAW = 2, WAVE_SQUARE = 3 };
@@ -155,6 +169,12 @@ struct chordism_instance_t {
     int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
     int   chord_type;    /* 0..NUM_CHORDS-1 — row in CHORD_TABLE */
     float detune;        /* 0..1 → 0..MAX_DETUNE_CENTS per chord step */
+    float filter_cutoff;     /* 0..1 → exp 20..20kHz */
+    float filter_resonance;  /* 0..1 → q from FILTER_Q_MAX (broad) to FILTER_Q_MIN (narrow/resonant) */
+
+    SVF   filter;
+    float filter_f;      /* precomputed 2*sin(π * cutoff_hz / sr), clamped */
+    float filter_q;      /* internal q (clamped to FILTER_Q_MIN min) */
 
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
@@ -214,6 +234,45 @@ static float lfo_sample(int shape, float phase) {
 static float lfo_rate_to_hz(float rate01) {
     float ratio = LFO_RATE_MAX_HZ / LFO_RATE_MIN_HZ;
     return LFO_RATE_MIN_HZ * powf(ratio, rate01);
+}
+
+/* Exp-map filter cutoff. */
+static float filter_cutoff_to_hz(float cutoff01) {
+    float ratio = FILTER_CUTOFF_MAX_HZ / FILTER_CUTOFF_MIN_HZ;
+    return FILTER_CUTOFF_MIN_HZ * powf(ratio, cutoff01);
+}
+
+/* Recompute SVF coefficients from normalized params. Clamps cutoff just
+ * under Nyquist for Chamberlin SVF stability. */
+static void filter_recompute(chordism_instance_t *inst) {
+    float hz = filter_cutoff_to_hz(inst->filter_cutoff);
+    /* Chamberlin SVF stable for cutoff < SAMPLE_RATE/6 ≈ 7350 Hz; above that
+     * the f coefficient distorts. We allow up to 0.25 * SR (11kHz) for
+     * usability and accept some warping at the top. */
+    float max_hz = SAMPLE_RATE * 0.25f;
+    if (hz > max_hz) hz = max_hz;
+    inst->filter_f = 2.0f * sinf(3.14159265358979f * hz / SAMPLE_RATE);
+
+    /* Linear interp from broad (q=FILTER_Q_MAX) to resonant (q=FILTER_Q_MIN). */
+    float q = FILTER_Q_MAX + (FILTER_Q_MIN - FILTER_Q_MAX) * inst->filter_resonance;
+    if (q < FILTER_Q_MIN) q = FILTER_Q_MIN;
+    inst->filter_q = q;
+}
+
+/* Process one sample through the Chamberlin SVF, return the lowpass output. */
+static inline float svf_lowpass(SVF *s, float input, float f, float q) {
+    s->low += f * s->band;
+    float high = input - s->low - q * s->band;
+    s->band += f * high;
+
+    /* State sanity clamps — protect against arithmetic explosion from
+     * pathological inputs. */
+    if (s->low > 4.0f)  s->low = 4.0f;
+    if (s->low < -4.0f) s->low = -4.0f;
+    if (s->band > 4.0f) s->band = 4.0f;
+    if (s->band < -4.0f) s->band = -4.0f;
+
+    return s->low;
 }
 
 /* Reflective wavefolder — folds input back across [-1, +1] (Buchla style). */
@@ -379,6 +438,11 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->lfo_shape = LFO_TRIANGLE;
     inst->chord_type = CHORD_MAJOR;
     inst->detune = 0.0f;
+    inst->filter_cutoff = 1.0f;       /* wide open by default */
+    inst->filter_resonance = 0.0f;    /* no resonance */
+    inst->filter.low = 0.0f;
+    inst->filter.band = 0.0f;
+    filter_recompute(inst);
     inst->shape_lfo.phase = 0.0f;
     inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
     inst->shape_lfo.shape = inst->lfo_shape;
@@ -463,6 +527,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
     } else if (strcmp(key, "detune") == 0) {
         inst->detune = param_from_string(val, inst->detune);
+    } else if (strcmp(key, "filter_cutoff") == 0) {
+        inst->filter_cutoff = param_from_string(val, inst->filter_cutoff);
+        filter_recompute(inst);
+    } else if (strcmp(key, "filter_resonance") == 0) {
+        inst->filter_resonance = param_from_string(val, inst->filter_resonance);
+        filter_recompute(inst);
     }
 }
 
@@ -490,8 +560,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->chord_type);
     } else if (key && strcmp(key, "detune") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->detune);
+    } else if (key && strcmp(key, "filter_cutoff") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->filter_cutoff);
+    } else if (key && strcmp(key, "filter_resonance") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->filter_resonance);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.8");
+        return snprintf(buf, buf_len, "0.0.9");
     }
     buf[0] = '\0';
     return 0;
@@ -571,7 +645,11 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             mix += s * v->env.value * v->velocity * voice_gain;
         }
 
-        float scaled = mix * master_gain;
+        /* Filter the post-mix signal. */
+        float filtered = svf_lowpass(&inst->filter, mix,
+                                     inst->filter_f, inst->filter_q);
+
+        float scaled = filtered * master_gain;
         if (scaled > 32767.0f) scaled = 32767.0f;
         if (scaled < -32768.0f) scaled = -32768.0f;
 
