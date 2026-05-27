@@ -173,7 +173,8 @@ struct chordism_instance_t {
     int   chord_type;    /* 0..NUM_CHORDS-1 — row in CHORD_TABLE */
     float detune;        /* 0..1 → 0..MAX_DETUNE_CENTS per chord step */
     float filter_cutoff;     /* 0..1 → exp 20..20kHz */
-    float filter_resonance;  /* 0..1 → q from FILTER_Q_MAX (broad) to FILTER_Q_MIN (narrow/resonant) */
+    float filter_resonance;  /* 0..1 → Q from FILTER_Q_MIN to FILTER_Q_MAX */
+    float drive;             /* 0..1 → 1..10x pre-tanh gain */
 
     SVF   filter;
     /* TPT SVF coefficients, precomputed. */
@@ -445,6 +446,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->detune = 0.0f;
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
+    inst->drive = 0.0f;               /* clean by default */
     inst->filter.ic1eq = 0.0f;
     inst->filter.ic2eq = 0.0f;
     filter_recompute(inst);
@@ -538,6 +540,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "filter_resonance") == 0) {
         inst->filter_resonance = param_from_string(val, inst->filter_resonance);
         filter_recompute(inst);
+    } else if (strcmp(key, "drive") == 0) {
+        inst->drive = param_from_string(val, inst->drive);
     }
 }
 
@@ -569,8 +573,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->filter_cutoff);
     } else if (key && strcmp(key, "filter_resonance") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_resonance);
+    } else if (key && strcmp(key, "drive") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->drive);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.9");
+        return snprintf(buf, buf_len, "0.0.10");
     }
     buf[0] = '\0';
     return 0;
@@ -656,7 +662,12 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                                      inst->filter_a2,
                                      inst->filter_a3);
 
-        float scaled = filtered * master_gain;
+        /* Drive — soft-clip via tanh. Gain ramps 1..10. At drive=0,
+         * tanh(x) ≈ x for small x, transparent for typical synth levels. */
+        float drive_gain = 1.0f + inst->drive * 9.0f;
+        float driven = tanhf(drive_gain * filtered);
+
+        float scaled = driven * master_gain;
         if (scaled > 32767.0f) scaled = 32767.0f;
         if (scaled < -32768.0f) scaled = -32768.0f;
 
