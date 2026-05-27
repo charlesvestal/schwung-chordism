@@ -1,0 +1,40 @@
+{
+  "id": "chordism",
+  "name": "Chordism",
+  "abbrev": "CH",
+  "version": "0.0.1",
+  "description": "Chord-based polyphonic synthesizer with morphing mixer (DVNA-inspired)",
+  "author": "charlesvestal",
+  "license": "MIT",
+  "dsp": "dsp.so",
+  "api_version": 2,
+  "capabilities": {
+    "audio_out": true,
+    "audio_in": false,
+    "midi_in": true,
+    "midi_out": false,
+    "aftertouch": true,
+    "chainable": true,
+    "component_type": "sound_generator",
+    "ui_hierarchy": {
+      "levels": {
+        "root": {
+          "name": "Chordism",
+          "params": [
+            {
+              "key": "version",
+              "label": "Version",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.0,
+              "step": 0.01,
+              "unit": ""
+            }
+          ],
+          "knobs": ["version"]
+        }
+      }
+    }
+  }
+}
