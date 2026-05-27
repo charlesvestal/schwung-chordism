@@ -51,9 +51,46 @@ static const float TWO_PI = 6.28318530717958647692f;
 static const int   CHORD_SIZE = 4;
 static const int   NUM_VOICES = 8;   /* 2 banks of CHORD_SIZE — old chord can ring out while new chord plays */
 
-/* Placeholder chord — root + M3 + P5 + octave. The full chord LUT comes in
- * milestone 4. */
-static const int CHORD_INTERVALS_SEMITONES[CHORD_SIZE] = { 0, 4, 7, 12 };
+/* Chord LUT — DVNA-spec chord types. Each row is CHORD_SIZE semitone offsets
+ * from the root note (in MIDI semitones, so 12 = octave). */
+enum ChordType {
+    CHORD_UNISON_OCTAVES = 0,
+    CHORD_FIFTH,
+    CHORD_MINOR,
+    CHORD_MINOR_7,
+    CHORD_MINOR_9,
+    CHORD_MINOR_11,
+    CHORD_MAJOR,
+    CHORD_MAJOR_7,
+    CHORD_MAJOR_9,
+    CHORD_SUS_4,
+    CHORD_SIX_NINE,
+    CHORD_MINOR_6,
+    CHORD_TENTH,
+    CHORD_DOMINANT_7,
+    CHORD_DOMINANT_7_B9,
+    CHORD_HALF_DIMINISHED,
+    NUM_CHORDS
+};
+
+static const int CHORD_TABLE[NUM_CHORDS][CHORD_SIZE] = {
+    { 0, 12, 24, 36 },   /* Unison/Octaves */
+    { 0,  7, 12, 19 },   /* Fifth */
+    { 0,  3,  7, 12 },   /* Minor */
+    { 0,  3,  7, 10 },   /* Minor 7 */
+    { 0,  3,  7, 14 },   /* Minor 9 */
+    { 0,  3,  7, 17 },   /* Minor 11 */
+    { 0,  4,  7, 12 },   /* Major */
+    { 0,  4,  7, 11 },   /* Major 7 */
+    { 0,  4,  7, 14 },   /* Major 9 */
+    { 0,  5,  7, 12 },   /* Suspended 4 */
+    { 0,  4,  9, 14 },   /* 6/9 */
+    { 0,  3,  7,  9 },   /* Minor 6 */
+    { 0,  4,  7, 16 },   /* 10th */
+    { 0,  4,  7, 10 },   /* Dominant 7 */
+    { 0,  4,  7, 13 },   /* Dominant 7 / b9 */
+    { 0,  3,  6, 10 },   /* Half Diminished */
+};
 
 /* Attack range: 1 ms .. 4 s, linear ramp.
  * Release range: 5 ms .. 4 s, exponential decay (asymptotic). */
@@ -111,6 +148,7 @@ struct chordism_instance_t {
     float lfo_rate;      /* 0..1 — exp-mapped to Hz */
     float lfo_depth;     /* 0..1 — modulation amount on shape */
     int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
+    int   chord_type;    /* 0..NUM_CHORDS-1 — row in CHORD_TABLE */
 
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
@@ -281,10 +319,14 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
     release_all_voices(inst);
 
     int base = inst->next_chord_base;
+    int chord = inst->chord_type;
+    if (chord < 0) chord = 0;
+    if (chord >= NUM_CHORDS) chord = NUM_CHORDS - 1;
+    const int *intervals = CHORD_TABLE[chord];
+
     for (int i = 0; i < CHORD_SIZE; ++i) {
         Voice *target = &inst->voices[base + i];
-        voice_start(inst, target, root_note,
-                    CHORD_INTERVALS_SEMITONES[i], velocity);
+        voice_start(inst, target, root_note, intervals[i], velocity);
     }
     inst->next_chord_base = (base + CHORD_SIZE) % NUM_VOICES;
 }
@@ -322,6 +364,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->lfo_rate = 0.0f;
     inst->lfo_depth = 0.0f;
     inst->lfo_shape = LFO_TRIANGLE;
+    inst->chord_type = CHORD_MAJOR;
     inst->shape_lfo.phase = 0.0f;
     inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
     inst->shape_lfo.shape = inst->lfo_shape;
@@ -397,6 +440,13 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->lfo_shape = s;
             inst->shape_lfo.shape = s;
         }
+    } else if (strcmp(key, "chord_type") == 0) {
+        if (val) {
+            int c = atoi(val);
+            if (c < 0) c = 0;
+            if (c >= NUM_CHORDS) c = NUM_CHORDS - 1;
+            inst->chord_type = c;
+        }
     }
 }
 
@@ -420,8 +470,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->lfo_depth);
     } else if (key && strcmp(key, "lfo_shape") == 0) {
         return snprintf(buf, buf_len, "%d", inst->lfo_shape);
+    } else if (key && strcmp(key, "chord_type") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->chord_type);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.6");
+        return snprintf(buf, buf_len, "0.0.7");
     }
     buf[0] = '\0';
     return 0;
