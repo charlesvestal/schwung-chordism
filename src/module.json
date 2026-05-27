@@ -2,7 +2,7 @@
   "id": "chordism",
   "name": "Chordism",
   "abbrev": "CH",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Chord-based polyphonic synthesizer with morphing mixer (DVNA-inspired)",
   "author": "charlesvestal",
   "license": "MIT",
@@ -42,6 +42,16 @@
               "options": ["Sine", "Triangle", "Saw", "Square"]
             },
             {
+              "key": "shape",
+              "label": "Shape",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.0,
+              "step": 0.01,
+              "unit": "%"
+            },
+            {
               "key": "attack",
               "label": "Attack",
               "type": "float",
@@ -62,7 +72,7 @@
               "unit": "%"
             }
           ],
-          "knobs": ["volume", "waveform", "attack", "release"]
+          "knobs": ["volume", "waveform", "shape", "attack", "release"]
         }
       }
     }
