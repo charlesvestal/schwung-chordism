@@ -3,7 +3,9 @@
  *
  * MIT License. See LICENSE.
  *
- * Milestone 2: single sine voice + AR envelope, mono last-note priority.
+ * Milestone 3a: 4-voice sine chord at fixed intervals
+ * (root, M3, P5, octave). Mono last-note priority with
+ * clean voice-steal release.
  */
 
 #include <stdio.h>
@@ -46,6 +48,12 @@ static const host_api_v1_t *g_host = nullptr;
 static const float SAMPLE_RATE = 44100.0f;
 static const float TWO_PI = 6.28318530717958647692f;
 
+static const int   NUM_VOICES = 4;
+
+/* Placeholder chord — root + M3 + P5 + octave. The full chord LUT comes in
+ * milestone 4. */
+static const int CHORD_INTERVALS_SEMITONES[NUM_VOICES] = { 0, 4, 7, 12 };
+
 /* Attack range: 1 ms .. 4 s, linear ramp.
  * Release range: 5 ms .. 4 s, exponential decay (asymptotic). */
 static const float ATTACK_MIN_S = 0.001f;
@@ -61,16 +69,16 @@ enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
 struct AREnv {
     EnvStage stage;
     float value;
-    float attack_inc;    /* linear increment per sample while in ATTACK */
-    float release_coef;  /* exponential decay coefficient per sample while in RELEASE */
+    float attack_inc;
+    float release_coef;
 };
 
 struct Voice {
-    bool active;        /* true between note-on and envelope finishing */
-    int note;           /* MIDI note number, 0..127 */
-    float phase;        /* 0..1 phase accumulator */
-    float phase_inc;    /* frequency / SAMPLE_RATE */
-    float velocity;     /* 0..1 */
+    bool active;
+    int root_note;       /* MIDI root that spawned this voice (for note-off match) */
+    float phase;
+    float phase_inc;
+    float velocity;
     AREnv env;
 };
 
@@ -82,7 +90,7 @@ struct chordism_instance_t {
     float release;
     float volume;
 
-    Voice voice;
+    Voice voices[NUM_VOICES];
 };
 
 /* ------------------------------------------------------------------------- */
@@ -105,7 +113,6 @@ static float param_from_string(const char *val, float fallback) {
     return clampf(v, 0.0f, 1.0f);
 }
 
-/* Linear map [0,1] -> [lo, hi]. */
 static float lerp01(float t, float lo, float hi) {
     return lo + (hi - lo) * t;
 }
@@ -118,32 +125,76 @@ static void env_recompute_rates(AREnv *env, float attack01, float release01) {
     if (attack_samples < 1.0f) attack_samples = 1.0f;
     env->attack_inc = 1.0f / attack_samples;
 
-    /* Exponential decay coefficient. After release_s seconds the envelope
-     * reaches e^-5 ≈ 0.0067 of its starting value, which we then clamp to 0
-     * via ENV_SILENCE. coef = exp(-5 / (release_s * SAMPLE_RATE)). */
     float release_samples = release_s * SAMPLE_RATE;
     if (release_samples < 1.0f) release_samples = 1.0f;
     env->release_coef = expf(-5.0f / release_samples);
 }
 
-static void voice_note_on(chordism_instance_t *inst, int note, int velocity) {
-    Voice *v = &inst->voice;
+/* Release every active voice. Used on note steal and on All Notes Off. */
+static void release_all_voices(chordism_instance_t *inst) {
+    for (int i = 0; i < NUM_VOICES; ++i) {
+        Voice *v = &inst->voices[i];
+        if (v->active && v->env.stage != ENV_RELEASE) {
+            v->env.stage = ENV_RELEASE;
+        }
+    }
+}
+
+/* Find a voice slot to assign — prefer fully-idle, otherwise steal whichever
+ * has the lowest envelope value (least audible interruption). */
+static Voice* claim_voice_slot(chordism_instance_t *inst) {
+    Voice *best = &inst->voices[0];
+    float best_score = best->active ? best->env.value : -1.0f;
+    for (int i = 1; i < NUM_VOICES; ++i) {
+        Voice *v = &inst->voices[i];
+        float score = v->active ? v->env.value : -1.0f;
+        if (score < best_score) {
+            best = v;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+static void voice_start(chordism_instance_t *inst, Voice *v,
+                        int root_note, int interval_semis, int velocity) {
     v->active = true;
-    v->note = note;
+    v->root_note = root_note;
     v->phase = 0.0f;
-    v->phase_inc = midi_to_hz(note) / SAMPLE_RATE;
+    v->phase_inc = midi_to_hz(root_note + interval_semis) / SAMPLE_RATE;
     v->velocity = (float)velocity / 127.0f;
 
     env_recompute_rates(&v->env, inst->attack, inst->release);
+    /* Reset env value so each voice starts from 0 — voice steal already
+     * released the previous chord. */
+    v->env.value = 0.0f;
     v->env.stage = ENV_ATTACK;
-    /* Soft retrigger: keep current env.value so we don't click; attack ramps
-     * up from wherever we are. */
 }
 
-static void voice_note_off(chordism_instance_t *inst, int note) {
-    Voice *v = &inst->voice;
-    if (!v->active || v->note != note) return;
-    v->env.stage = ENV_RELEASE;
+static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
+    /* Steal: release any currently-sounding chord. The released voices keep
+     * ringing through their decay while the new chord starts in parallel —
+     * masks click. */
+    release_all_voices(inst);
+
+    for (int i = 0; i < NUM_VOICES; ++i) {
+        Voice *target = claim_voice_slot(inst);
+        voice_start(inst, target, root_note,
+                    CHORD_INTERVALS_SEMITONES[i], velocity);
+    }
+}
+
+static void chord_off(chordism_instance_t *inst, int root_note) {
+    /* Release all voices whose root_note matches. (Last-note mono means
+     * only the most recent chord is sounding; this handles the case where
+     * the user releases the same key.) */
+    for (int i = 0; i < NUM_VOICES; ++i) {
+        Voice *v = &inst->voices[i];
+        if (v->active && v->root_note == root_note &&
+            v->env.stage != ENV_RELEASE) {
+            v->env.stage = ENV_RELEASE;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -161,11 +212,14 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->attack = 0.05f;
     inst->release = 0.30f;
     inst->volume = 0.80f;
-    inst->voice.env.stage = ENV_IDLE;
-    env_recompute_rates(&inst->voice.env, inst->attack, inst->release);
+
+    for (int i = 0; i < NUM_VOICES; ++i) {
+        inst->voices[i].env.stage = ENV_IDLE;
+        env_recompute_rates(&inst->voices[i].env, inst->attack, inst->release);
+    }
 
     if (g_host && g_host->log) {
-        g_host->log("[chordism] instance created");
+        g_host->log("[chordism] instance created (4-voice)");
     }
     return inst;
 }
@@ -184,12 +238,11 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     uint8_t d2 = msg[2] & 0x7F;
 
     if (status == 0x90 && d2 > 0) {
-        voice_note_on(inst, d1, d2);
+        chord_on(inst, d1, d2);
     } else if (status == 0x80 || (status == 0x90 && d2 == 0)) {
-        voice_note_off(inst, d1);
+        chord_off(inst, d1);
     } else if (status == 0xB0 && d1 == 123) {
-        /* All Notes Off */
-        if (inst->voice.active) inst->voice.env.stage = ENV_RELEASE;
+        release_all_voices(inst);
     }
 }
 
@@ -199,10 +252,14 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
 
     if (strcmp(key, "attack") == 0) {
         inst->attack = param_from_string(val, inst->attack);
-        env_recompute_rates(&inst->voice.env, inst->attack, inst->release);
+        for (int i = 0; i < NUM_VOICES; ++i) {
+            env_recompute_rates(&inst->voices[i].env, inst->attack, inst->release);
+        }
     } else if (strcmp(key, "release") == 0) {
         inst->release = param_from_string(val, inst->release);
-        env_recompute_rates(&inst->voice.env, inst->attack, inst->release);
+        for (int i = 0; i < NUM_VOICES; ++i) {
+            env_recompute_rates(&inst->voices[i].env, inst->attack, inst->release);
+        }
     } else if (strcmp(key, "volume") == 0) {
         inst->volume = param_from_string(val, inst->volume);
     }
@@ -219,7 +276,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "volume") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->volume);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.2");
+        return snprintf(buf, buf_len, "0.0.3");
     }
     buf[0] = '\0';
     return 0;
@@ -239,17 +296,21 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         return;
     }
     auto *inst = (chordism_instance_t*)instance;
-    Voice *v = &inst->voice;
 
-    /* Voice gain — convert 0..1 volume to int16 headroom. Keep 6 dB headroom
-     * by scaling to 16000 instead of 32767 (so future polyphony has room). */
-    const float gain = inst->volume * 16000.0f;
+    /* Sum across all voices, scale to int16. 4 voices summed at unit amplitude
+     * could peak at ±4.0; divide by NUM_VOICES so each voice contributes at
+     * 1/N. Then volume scales the mix. Keep 6 dB headroom against future
+     * polyphony — gain of 16000 instead of 32767. */
+    const float voice_gain = 1.0f / (float)NUM_VOICES;
+    const float master_gain = inst->volume * 16000.0f;
 
     for (int i = 0; i < frames; ++i) {
-        float sample = 0.0f;
+        float mix = 0.0f;
 
-        if (v->active) {
-            /* Envelope */
+        for (int vi = 0; vi < NUM_VOICES; ++vi) {
+            Voice *v = &inst->voices[vi];
+            if (!v->active) continue;
+
             switch (v->env.stage) {
                 case ENV_ATTACK:
                     v->env.value += v->env.attack_inc;
@@ -259,7 +320,6 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                     }
                     break;
                 case ENV_HOLD:
-                    /* gate held — value stays at 1 */
                     break;
                 case ENV_RELEASE:
                     v->env.value *= v->env.release_coef;
@@ -275,15 +335,16 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                     break;
             }
 
-            /* Sine oscillator */
+            if (!v->active) continue;
+
             float s = sinf(TWO_PI * v->phase);
             v->phase += v->phase_inc;
             if (v->phase >= 1.0f) v->phase -= 1.0f;
 
-            sample = s * v->env.value * v->velocity;
+            mix += s * v->env.value * v->velocity * voice_gain;
         }
 
-        float scaled = sample * gain;
+        float scaled = mix * master_gain;
         if (scaled > 32767.0f) scaled = 32767.0f;
         if (scaled < -32768.0f) scaled = -32768.0f;
 
