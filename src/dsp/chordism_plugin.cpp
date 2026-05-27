@@ -102,6 +102,11 @@ static const float RELEASE_MAX_S = 4.0f;
 /* Silence threshold below which the envelope clamps to 0 and the voice idles. */
 static const float ENV_SILENCE = 1e-4f;
 
+/* Detune max — applied as (chord_step_index * detune * MAX_DETUNE_CENTS).
+ * 50 cents per step means voice 3 can be up to 150 cents (1.5 semitones)
+ * sharp of voice 0 at full detune. */
+static const float MAX_DETUNE_CENTS = 50.0f;
+
 enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
 
 enum Waveform { WAVE_SINE = 0, WAVE_TRIANGLE = 1, WAVE_SAW = 2, WAVE_SQUARE = 3 };
@@ -149,6 +154,7 @@ struct chordism_instance_t {
     float lfo_depth;     /* 0..1 — modulation amount on shape */
     int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
     int   chord_type;    /* 0..NUM_CHORDS-1 — row in CHORD_TABLE */
+    float detune;        /* 0..1 → 0..MAX_DETUNE_CENTS per chord step */
 
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
@@ -298,11 +304,16 @@ static void release_all_voices(chordism_instance_t *inst) {
 }
 
 static void voice_start(chordism_instance_t *inst, Voice *v,
-                        int root_note, int interval_semis, int velocity) {
+                        int root_note, int interval_semis,
+                        float detune_cents, int velocity) {
     v->active = true;
     v->root_note = root_note;
     v->phase = 0.0f;
-    v->phase_inc = midi_to_hz(root_note + interval_semis) / SAMPLE_RATE;
+    float hz = midi_to_hz(root_note + interval_semis);
+    if (detune_cents != 0.0f) {
+        hz *= powf(2.0f, detune_cents / 1200.0f);
+    }
+    v->phase_inc = hz / SAMPLE_RATE;
     v->velocity = (float)velocity / 127.0f;
 
     env_recompute_rates(&v->env, inst->attack, inst->release);
@@ -326,7 +337,9 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
 
     for (int i = 0; i < CHORD_SIZE; ++i) {
         Voice *target = &inst->voices[base + i];
-        voice_start(inst, target, root_note, intervals[i], velocity);
+        /* Detune linear: voice 0 = 0¢, voice 1 = +detune*MAX¢, ... */
+        float cents = (float)i * inst->detune * MAX_DETUNE_CENTS;
+        voice_start(inst, target, root_note, intervals[i], cents, velocity);
     }
     inst->next_chord_base = (base + CHORD_SIZE) % NUM_VOICES;
 }
@@ -365,6 +378,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->lfo_depth = 0.0f;
     inst->lfo_shape = LFO_TRIANGLE;
     inst->chord_type = CHORD_MAJOR;
+    inst->detune = 0.0f;
     inst->shape_lfo.phase = 0.0f;
     inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
     inst->shape_lfo.shape = inst->lfo_shape;
@@ -447,6 +461,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (c >= NUM_CHORDS) c = NUM_CHORDS - 1;
             inst->chord_type = c;
         }
+    } else if (strcmp(key, "detune") == 0) {
+        inst->detune = param_from_string(val, inst->detune);
     }
 }
 
@@ -472,8 +488,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->lfo_shape);
     } else if (key && strcmp(key, "chord_type") == 0) {
         return snprintf(buf, buf_len, "%d", inst->chord_type);
+    } else if (key && strcmp(key, "detune") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->detune);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.7");
+        return snprintf(buf, buf_len, "0.0.8");
     }
     buf[0] = '\0';
     return 0;
