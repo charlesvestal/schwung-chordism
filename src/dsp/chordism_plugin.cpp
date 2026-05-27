@@ -107,18 +107,21 @@ static const float ENV_SILENCE = 1e-4f;
  * sharp of voice 0 at full detune. */
 static const float MAX_DETUNE_CENTS = 50.0f;
 
-/* Filter cutoff range, exp-mapped 0..1 → 20 Hz .. ~Nyquist (clamped just
- * under SAMPLE_RATE/2 for SVF stability). */
+/* Filter cutoff range, exp-mapped 0..1 → 20 Hz .. 20 kHz. TPT SVF is stable
+ * up to Nyquist but tan() blows up exactly AT Nyquist — keep cutoff under
+ * 0.49 * SR. */
 static const float FILTER_CUTOFF_MIN_HZ = 20.0f;
 static const float FILTER_CUTOFF_MAX_HZ = 20000.0f;
-/* Internal q range (Chamberlin: smaller q ↔ more resonance). 0.05 self-
- * oscillates; clamp to 0.10 minimum. 1.41 ≈ Butterworth Q. */
-static const float FILTER_Q_MAX = 1.41f;
-static const float FILTER_Q_MIN = 0.10f;
+/* Resonance maps to Q (peak height). 0 = broad (Q=0.5, Butterworth-ish),
+ * 1 = very resonant (Q=20). */
+static const float FILTER_Q_MIN = 0.5f;
+static const float FILTER_Q_MAX = 20.0f;
 
+/* TPT (Topology-Preserving Transform) SVF state — Vadim Zavalishin /
+ * Andy Simper formulation. Stable for any g and k. */
 struct SVF {
-    float low;
-    float band;
+    float ic1eq;
+    float ic2eq;
 };
 
 enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
@@ -173,8 +176,11 @@ struct chordism_instance_t {
     float filter_resonance;  /* 0..1 → q from FILTER_Q_MAX (broad) to FILTER_Q_MIN (narrow/resonant) */
 
     SVF   filter;
-    float filter_f;      /* precomputed 2*sin(π * cutoff_hz / sr), clamped */
-    float filter_q;      /* internal q (clamped to FILTER_Q_MIN min) */
+    /* TPT SVF coefficients, precomputed. */
+    float filter_a1;
+    float filter_a2;
+    float filter_a3;
+    float filter_k;
 
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
@@ -242,37 +248,36 @@ static float filter_cutoff_to_hz(float cutoff01) {
     return FILTER_CUTOFF_MIN_HZ * powf(ratio, cutoff01);
 }
 
-/* Recompute SVF coefficients from normalized params. Clamps cutoff just
- * under Nyquist for Chamberlin SVF stability. */
+/* Recompute TPT SVF coefficients. Stable for any g and k. */
 static void filter_recompute(chordism_instance_t *inst) {
     float hz = filter_cutoff_to_hz(inst->filter_cutoff);
-    /* Chamberlin SVF stable for cutoff < SAMPLE_RATE/6 ≈ 7350 Hz; above that
-     * the f coefficient distorts. We allow up to 0.25 * SR (11kHz) for
-     * usability and accept some warping at the top. */
-    float max_hz = SAMPLE_RATE * 0.25f;
+    float max_hz = SAMPLE_RATE * 0.49f;
     if (hz > max_hz) hz = max_hz;
-    inst->filter_f = 2.0f * sinf(3.14159265358979f * hz / SAMPLE_RATE);
+    if (hz < 1.0f) hz = 1.0f;
 
-    /* Linear interp from broad (q=FILTER_Q_MAX) to resonant (q=FILTER_Q_MIN). */
-    float q = FILTER_Q_MAX + (FILTER_Q_MIN - FILTER_Q_MAX) * inst->filter_resonance;
-    if (q < FILTER_Q_MIN) q = FILTER_Q_MIN;
-    inst->filter_q = q;
+    float g = tanf(3.14159265358979f * hz / SAMPLE_RATE);
+
+    /* Q ramps from broad (FILTER_Q_MIN) to resonant (FILTER_Q_MAX). */
+    float Q = FILTER_Q_MIN + (FILTER_Q_MAX - FILTER_Q_MIN) * inst->filter_resonance;
+    if (Q < 0.05f) Q = 0.05f;
+    float k = 1.0f / Q;
+
+    inst->filter_k  = k;
+    inst->filter_a1 = 1.0f / (1.0f + g * (g + k));
+    inst->filter_a2 = g * inst->filter_a1;
+    inst->filter_a3 = g * inst->filter_a2;
 }
 
-/* Process one sample through the Chamberlin SVF, return the lowpass output. */
-static inline float svf_lowpass(SVF *s, float input, float f, float q) {
-    s->low += f * s->band;
-    float high = input - s->low - q * s->band;
-    s->band += f * high;
-
-    /* State sanity clamps — protect against arithmetic explosion from
-     * pathological inputs. */
-    if (s->low > 4.0f)  s->low = 4.0f;
-    if (s->low < -4.0f) s->low = -4.0f;
-    if (s->band > 4.0f) s->band = 4.0f;
-    if (s->band < -4.0f) s->band = -4.0f;
-
-    return s->low;
+/* TPT SVF lowpass: stable for any g (tan-mapped cutoff) and k (1/Q).
+ * Andy Simper / Vadim Zavalishin formulation. */
+static inline float svf_lowpass(SVF *s, float input,
+                                float a1, float a2, float a3) {
+    float v3 = input - s->ic2eq;
+    float v1 = a1 * s->ic1eq + a2 * v3;
+    float v2 = s->ic2eq + a2 * s->ic1eq + a3 * v3;
+    s->ic1eq = 2.0f * v1 - s->ic1eq;
+    s->ic2eq = 2.0f * v2 - s->ic2eq;
+    return v2;
 }
 
 /* Reflective wavefolder — folds input back across [-1, +1] (Buchla style). */
@@ -440,8 +445,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->detune = 0.0f;
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
-    inst->filter.low = 0.0f;
-    inst->filter.band = 0.0f;
+    inst->filter.ic1eq = 0.0f;
+    inst->filter.ic2eq = 0.0f;
     filter_recompute(inst);
     inst->shape_lfo.phase = 0.0f;
     inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
@@ -647,7 +652,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
         /* Filter the post-mix signal. */
         float filtered = svf_lowpass(&inst->filter, mix,
-                                     inst->filter_f, inst->filter_q);
+                                     inst->filter_a1,
+                                     inst->filter_a2,
+                                     inst->filter_a3);
 
         float scaled = filtered * master_gain;
         if (scaled > 32767.0f) scaled = 32767.0f;
