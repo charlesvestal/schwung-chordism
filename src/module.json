@@ -2,7 +2,7 @@
   "id": "chordism",
   "name": "Chordism",
   "abbrev": "CH",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Chord-based polyphonic synthesizer with morphing mixer (DVNA-inspired)",
   "author": "charlesvestal",
   "license": "MIT",
@@ -52,6 +52,36 @@
               "unit": "%"
             },
             {
+              "key": "lfo_shape",
+              "label": "LFO Wave",
+              "type": "int",
+              "min": 0,
+              "max": 3,
+              "default": 0,
+              "step": 1,
+              "options": ["Triangle", "Ramp Up", "Ramp Down", "Square"]
+            },
+            {
+              "key": "lfo_rate",
+              "label": "LFO Rate",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.0,
+              "step": 0.01,
+              "unit": "%"
+            },
+            {
+              "key": "lfo_depth",
+              "label": "LFO Depth",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.0,
+              "step": 0.01,
+              "unit": "%"
+            },
+            {
               "key": "attack",
               "label": "Attack",
               "type": "float",
@@ -72,7 +102,7 @@
               "unit": "%"
             }
           ],
-          "knobs": ["volume", "waveform", "shape", "attack", "release"]
+          "knobs": ["volume", "waveform", "shape", "lfo_rate", "lfo_depth", "lfo_shape", "attack", "release"]
         }
       }
     }
