@@ -67,6 +67,9 @@ static const float ENV_SILENCE = 1e-4f;
 
 enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
 
+enum Waveform { WAVE_SINE = 0, WAVE_TRIANGLE = 1, WAVE_SAW = 2, WAVE_SQUARE = 3 };
+static const int NUM_WAVEFORMS = 4;
+
 struct AREnv {
     EnvStage stage;
     float value;
@@ -86,10 +89,11 @@ struct Voice {
 struct chordism_instance_t {
     char module_dir[512];
 
-    /* Params (all normalized 0..1) */
-    float attack;
-    float release;
-    float volume;
+    /* Params */
+    float attack;        /* 0..1 */
+    float release;       /* 0..1 */
+    float volume;        /* 0..1 */
+    int   waveform;      /* 0..NUM_WAVEFORMS-1 */
 
     Voice voices[NUM_VOICES];
     int next_chord_base;   /* 0 or CHORD_SIZE — round-robin between voice banks */
@@ -117,6 +121,53 @@ static float param_from_string(const char *val, float fallback) {
 
 static float lerp01(float t, float lo, float hi) {
     return lo + (hi - lo) * t;
+}
+
+/* PolyBLEP — Polynomial Bandlimited stEP correction. Subtracts the
+ * high-frequency content introduced by a discontinuous waveform transition
+ * at sample t (phase in [0,1)). dt is phase_inc per sample. Returns 0
+ * outside the small neighborhood around the discontinuity. */
+static float poly_blep(float t, float dt) {
+    if (t < dt) {
+        t /= dt;
+        return t + t - t * t - 1.0f;
+    } else if (t > 1.0f - dt) {
+        t = (t - 1.0f) / dt;
+        return t * t + t + t + 1.0f;
+    }
+    return 0.0f;
+}
+
+static float osc_sample(int waveform, float phase, float phase_inc) {
+    switch (waveform) {
+        case WAVE_SINE:
+            return sinf(TWO_PI * phase);
+
+        case WAVE_TRIANGLE:
+            /* Triangle's harmonics roll off as 1/n^2 — aliasing is
+             * inaudible at audio rates. Compute directly. */
+            return 4.0f * fabsf(phase - 0.5f) - 1.0f;
+
+        case WAVE_SAW: {
+            float s = 2.0f * phase - 1.0f;
+            s -= poly_blep(phase, phase_inc);
+            return s;
+        }
+
+        case WAVE_SQUARE: {
+            /* Two discontinuities per cycle (phase=0 rising, phase=0.5
+             * falling). PolyBLEP at each with opposite signs. */
+            float t2 = phase + 0.5f;
+            if (t2 >= 1.0f) t2 -= 1.0f;
+            float s = (phase < 0.5f) ? 1.0f : -1.0f;
+            s += poly_blep(phase, phase_inc);
+            s -= poly_blep(t2, phase_inc);
+            return s;
+        }
+
+        default:
+            return 0.0f;
+    }
 }
 
 static void env_recompute_rates(AREnv *env, float attack01, float release01) {
@@ -200,6 +251,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->attack = 0.05f;
     inst->release = 0.30f;
     inst->volume = 0.80f;
+    inst->waveform = WAVE_SINE;
 
     for (int i = 0; i < NUM_VOICES; ++i) {
         inst->voices[i].env.stage = ENV_IDLE;
@@ -250,6 +302,13 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
     } else if (strcmp(key, "volume") == 0) {
         inst->volume = param_from_string(val, inst->volume);
+    } else if (strcmp(key, "waveform") == 0) {
+        if (val) {
+            int w = atoi(val);
+            if (w < 0) w = 0;
+            if (w >= NUM_WAVEFORMS) w = NUM_WAVEFORMS - 1;
+            inst->waveform = w;
+        }
     }
 }
 
@@ -263,8 +322,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->release);
     } else if (key && strcmp(key, "volume") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->volume);
+    } else if (key && strcmp(key, "waveform") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->waveform);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.3");
+        return snprintf(buf, buf_len, "0.0.4");
     }
     buf[0] = '\0';
     return 0;
@@ -327,7 +388,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             if (!v->active) continue;
 
-            float s = sinf(TWO_PI * v->phase);
+            float s = osc_sample(inst->waveform, v->phase, v->phase_inc);
             v->phase += v->phase_inc;
             if (v->phase >= 1.0f) v->phase -= 1.0f;
 
