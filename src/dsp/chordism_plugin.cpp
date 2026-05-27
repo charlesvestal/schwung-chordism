@@ -152,6 +152,15 @@ struct AREnv {
     float release_coef;
 };
 
+/* AD (Attack-Decay) envelope — note-triggered, ignores gate. Shares attack
+ * timing with AR's attack_inc and decay timing with release_coef. */
+struct ADEnv {
+    EnvStage stage;
+    float value;
+    float attack_inc;
+    float decay_coef;
+};
+
 struct Voice {
     bool active;
     int root_note;       /* MIDI root that spawned this voice (for note-off match) */
@@ -178,14 +187,20 @@ struct chordism_instance_t {
     float filter_cutoff;     /* 0..1 → exp 20..20kHz */
     float filter_resonance;  /* 0..1 → Q from FILTER_Q_MIN to FILTER_Q_MAX */
     int   filter_mode;       /* 0..NUM_FILTER_MODES-1 */
+    float filter_env_attack; /* 0..1 → linear A time */
+    float filter_env_decay;  /* 0..1 → exp D time */
+    float filter_env_depth;  /* -1..+1 — bipolar modulation of cutoff */
     float drive;             /* 0..1 → 1..10x pre-tanh gain */
 
     SVF   filter;
-    /* TPT SVF coefficients, precomputed. */
+    /* TPT SVF coefficients, precomputed at base cutoff (filter_recompute).
+     * If filter_env_depth != 0, render_block recomputes per-sample. */
     float filter_a1;
     float filter_a2;
     float filter_a3;
     float filter_k;
+
+    ADEnv filter_env;
 
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
@@ -356,6 +371,45 @@ static float osc_sample(int waveform, float phase, float phase_inc, float shape)
     }
 }
 
+static void aenv_recompute_rates(ADEnv *env, float attack01, float decay01) {
+    float attack_s = lerp01(attack01, ATTACK_MIN_S, ATTACK_MAX_S);
+    float decay_s = lerp01(decay01, RELEASE_MIN_S, RELEASE_MAX_S);
+
+    float attack_samples = attack_s * SAMPLE_RATE;
+    if (attack_samples < 1.0f) attack_samples = 1.0f;
+    env->attack_inc = 1.0f / attack_samples;
+
+    float decay_samples = decay_s * SAMPLE_RATE;
+    if (decay_samples < 1.0f) decay_samples = 1.0f;
+    env->decay_coef = expf(-5.0f / decay_samples);
+}
+
+/* Tick AD envelope by one sample, return current value 0..1.
+ * Stage flow: ATTACK (linear up to 1) → RELEASE (exp decay) → IDLE.
+ * Reuses ENV_RELEASE as the decay stage. */
+static inline float aenv_tick(ADEnv *env) {
+    switch (env->stage) {
+        case ENV_ATTACK:
+            env->value += env->attack_inc;
+            if (env->value >= 1.0f) {
+                env->value = 1.0f;
+                env->stage = ENV_RELEASE;
+            }
+            break;
+        case ENV_RELEASE:
+            env->value *= env->decay_coef;
+            if (env->value < ENV_SILENCE) {
+                env->value = 0.0f;
+                env->stage = ENV_IDLE;
+            }
+            break;
+        case ENV_IDLE:
+        default:
+            break;
+    }
+    return env->value;
+}
+
 static void env_recompute_rates(AREnv *env, float attack01, float release01) {
     float attack_s = lerp01(attack01, ATTACK_MIN_S, ATTACK_MAX_S);
     float release_s = lerp01(release01, RELEASE_MIN_S, RELEASE_MAX_S);
@@ -418,6 +472,12 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
         voice_start(inst, target, root_note, intervals[i], cents, velocity);
     }
     inst->next_chord_base = (base + CHORD_SIZE) % NUM_VOICES;
+
+    /* Re-trigger filter envelope from the start (hard reset to 0). */
+    aenv_recompute_rates(&inst->filter_env,
+                         inst->filter_env_attack, inst->filter_env_decay);
+    inst->filter_env.value = 0.0f;
+    inst->filter_env.stage = ENV_ATTACK;
 }
 
 static void chord_off(chordism_instance_t *inst, int root_note) {
@@ -458,6 +518,13 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
     inst->filter_mode = FILT_LP;
+    inst->filter_env_attack = 0.0f;
+    inst->filter_env_decay = 0.30f;
+    inst->filter_env_depth = 0.0f;    /* disabled by default */
+    inst->filter_env.stage = ENV_IDLE;
+    inst->filter_env.value = 0.0f;
+    aenv_recompute_rates(&inst->filter_env,
+                         inst->filter_env_attack, inst->filter_env_decay);
     inst->drive = 0.0f;               /* clean by default */
     inst->filter.ic1eq = 0.0f;
     inst->filter.ic2eq = 0.0f;
@@ -561,6 +628,24 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (m >= NUM_FILTER_MODES) m = NUM_FILTER_MODES - 1;
             inst->filter_mode = m;
         }
+    } else if (strcmp(key, "filter_env_attack") == 0) {
+        inst->filter_env_attack = param_from_string(val, inst->filter_env_attack);
+        aenv_recompute_rates(&inst->filter_env,
+                             inst->filter_env_attack, inst->filter_env_decay);
+    } else if (strcmp(key, "filter_env_decay") == 0) {
+        inst->filter_env_decay = param_from_string(val, inst->filter_env_decay);
+        aenv_recompute_rates(&inst->filter_env,
+                             inst->filter_env_attack, inst->filter_env_decay);
+    } else if (strcmp(key, "filter_env_depth") == 0) {
+        if (val) {
+            char *end = nullptr;
+            float v = strtof(val, &end);
+            if (end != val) {
+                if (v < -1.0f) v = -1.0f;
+                if (v > 1.0f) v = 1.0f;
+                inst->filter_env_depth = v;
+            }
+        }
     }
 }
 
@@ -596,8 +681,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->drive);
     } else if (key && strcmp(key, "filter_mode") == 0) {
         return snprintf(buf, buf_len, "%d", inst->filter_mode);
+    } else if (key && strcmp(key, "filter_env_attack") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->filter_env_attack);
+    } else if (key && strcmp(key, "filter_env_decay") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->filter_env_decay);
+    } else if (key && strcmp(key, "filter_env_depth") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.11");
+        return snprintf(buf, buf_len, "0.0.12");
     }
     buf[0] = '\0';
     return 0;
@@ -677,12 +768,31 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             mix += s * v->env.value * v->velocity * voice_gain;
         }
 
+        /* Filter coefficients: use precomputed static values, unless filter
+         * envelope is active — then recompute per sample. */
+        float a1 = inst->filter_a1;
+        float a2 = inst->filter_a2;
+        float a3 = inst->filter_a3;
+        if (inst->filter_env_depth != 0.0f) {
+            float env_val = aenv_tick(&inst->filter_env);
+            float effective = inst->filter_cutoff + env_val * inst->filter_env_depth;
+            if (effective < 0.0f) effective = 0.0f;
+            if (effective > 1.0f) effective = 1.0f;
+
+            float hz = filter_cutoff_to_hz(effective);
+            float max_hz = SAMPLE_RATE * 0.49f;
+            if (hz > max_hz) hz = max_hz;
+            if (hz < 1.0f) hz = 1.0f;
+
+            float g = tanf(3.14159265358979f * hz / SAMPLE_RATE);
+            a1 = 1.0f / (1.0f + g * (g + inst->filter_k));
+            a2 = g * a1;
+            a3 = g * a2;
+        }
+
         /* Filter the post-mix signal. */
         float filtered = svf_process(&inst->filter, mix, inst->filter_mode,
-                                     inst->filter_a1,
-                                     inst->filter_a2,
-                                     inst->filter_a3,
-                                     inst->filter_k);
+                                     a1, a2, a3, inst->filter_k);
 
         /* Drive — soft-clip via tanh. Gain ramps 1..10. At drive=0,
          * tanh(x) ≈ x for small x, transparent for typical synth levels. */
