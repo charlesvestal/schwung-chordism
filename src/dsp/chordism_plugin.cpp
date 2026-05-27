@@ -70,6 +70,19 @@ enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
 enum Waveform { WAVE_SINE = 0, WAVE_TRIANGLE = 1, WAVE_SAW = 2, WAVE_SQUARE = 3 };
 static const int NUM_WAVEFORMS = 4;
 
+enum LFOShape { LFO_TRIANGLE = 0, LFO_RAMP_UP = 1, LFO_RAMP_DOWN = 2, LFO_SQUARE = 3 };
+static const int NUM_LFO_SHAPES = 4;
+
+/* LFO rate range, exp-mapped: 0.01 Hz (very slow swell) to 10 Hz (vibrato-ish). */
+static const float LFO_RATE_MIN_HZ = 0.01f;
+static const float LFO_RATE_MAX_HZ = 10.0f;
+
+struct LFO {
+    float phase;      /* 0..1 */
+    float phase_inc;  /* per audio sample */
+    int   shape;      /* 0..NUM_LFO_SHAPES-1 */
+};
+
 struct AREnv {
     EnvStage stage;
     float value;
@@ -95,7 +108,11 @@ struct chordism_instance_t {
     float volume;        /* 0..1 */
     int   waveform;      /* 0..NUM_WAVEFORMS-1 */
     float shape;         /* 0..1 — per-waveform variable attribute */
+    float lfo_rate;      /* 0..1 — exp-mapped to Hz */
+    float lfo_depth;     /* 0..1 — modulation amount on shape */
+    int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
 
+    LFO   shape_lfo;
     Voice voices[NUM_VOICES];
     int next_chord_base;   /* 0 or CHORD_SIZE — round-robin between voice banks */
 };
@@ -137,6 +154,22 @@ static float poly_blep(float t, float dt) {
         return t * t + t + t + 1.0f;
     }
     return 0.0f;
+}
+
+static float lfo_sample(int shape, float phase) {
+    switch (shape) {
+        case LFO_TRIANGLE:  return 4.0f * fabsf(phase - 0.5f) - 1.0f;
+        case LFO_RAMP_UP:   return 2.0f * phase - 1.0f;
+        case LFO_RAMP_DOWN: return 1.0f - 2.0f * phase;
+        case LFO_SQUARE:    return (phase < 0.5f) ? 1.0f : -1.0f;
+        default:            return 0.0f;
+    }
+}
+
+/* Exp-map [0,1] to [LFO_RATE_MIN_HZ, LFO_RATE_MAX_HZ]. */
+static float lfo_rate_to_hz(float rate01) {
+    float ratio = LFO_RATE_MAX_HZ / LFO_RATE_MIN_HZ;
+    return LFO_RATE_MIN_HZ * powf(ratio, rate01);
 }
 
 /* Reflective wavefolder — folds input back across [-1, +1] (Buchla style). */
@@ -286,6 +319,12 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->volume = 0.80f;
     inst->waveform = WAVE_SINE;
     inst->shape = 0.0f;
+    inst->lfo_rate = 0.0f;
+    inst->lfo_depth = 0.0f;
+    inst->lfo_shape = LFO_TRIANGLE;
+    inst->shape_lfo.phase = 0.0f;
+    inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
+    inst->shape_lfo.shape = inst->lfo_shape;
 
     for (int i = 0; i < NUM_VOICES; ++i) {
         inst->voices[i].env.stage = ENV_IDLE;
@@ -345,6 +384,19 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
     } else if (strcmp(key, "shape") == 0) {
         inst->shape = param_from_string(val, inst->shape);
+    } else if (strcmp(key, "lfo_rate") == 0) {
+        inst->lfo_rate = param_from_string(val, inst->lfo_rate);
+        inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
+    } else if (strcmp(key, "lfo_depth") == 0) {
+        inst->lfo_depth = param_from_string(val, inst->lfo_depth);
+    } else if (strcmp(key, "lfo_shape") == 0) {
+        if (val) {
+            int s = atoi(val);
+            if (s < 0) s = 0;
+            if (s >= NUM_LFO_SHAPES) s = NUM_LFO_SHAPES - 1;
+            inst->lfo_shape = s;
+            inst->shape_lfo.shape = s;
+        }
     }
 }
 
@@ -362,8 +414,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->waveform);
     } else if (key && strcmp(key, "shape") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->shape);
+    } else if (key && strcmp(key, "lfo_rate") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->lfo_rate);
+    } else if (key && strcmp(key, "lfo_depth") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->lfo_depth);
+    } else if (key && strcmp(key, "lfo_shape") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_shape);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.5");
+        return snprintf(buf, buf_len, "0.0.6");
     }
     buf[0] = '\0';
     return 0;
@@ -393,7 +451,17 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     const float voice_gain = 1.0f / (float)CHORD_SIZE;
     const float master_gain = inst->volume * 16000.0f;
 
+    LFO *lfo = &inst->shape_lfo;
+
     for (int i = 0; i < frames; ++i) {
+        /* Advance shape LFO, compute effective shape value for this sample. */
+        lfo->phase += lfo->phase_inc;
+        if (lfo->phase >= 1.0f) lfo->phase -= 1.0f;
+        float lfo_val = lfo_sample(lfo->shape, lfo->phase) * inst->lfo_depth;
+        float effective_shape = inst->shape + lfo_val;
+        if (effective_shape < 0.0f) effective_shape = 0.0f;
+        if (effective_shape > 1.0f) effective_shape = 1.0f;
+
         float mix = 0.0f;
 
         for (int vi = 0; vi < NUM_VOICES; ++vi) {
@@ -426,7 +494,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             if (!v->active) continue;
 
-            float s = osc_sample(inst->waveform, v->phase, v->phase_inc, inst->shape);
+            float s = osc_sample(inst->waveform, v->phase, v->phase_inc, effective_shape);
             v->phase += v->phase_inc;
             if (v->phase >= 1.0f) v->phase -= 1.0f;
 
