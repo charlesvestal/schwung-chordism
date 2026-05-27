@@ -124,6 +124,9 @@ struct SVF {
     float ic2eq;
 };
 
+enum FilterMode { FILT_LP = 0, FILT_HP = 1, FILT_BP = 2 };
+static const int NUM_FILTER_MODES = 3;
+
 enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
 
 enum Waveform { WAVE_SINE = 0, WAVE_TRIANGLE = 1, WAVE_SAW = 2, WAVE_SQUARE = 3 };
@@ -174,6 +177,7 @@ struct chordism_instance_t {
     float detune;        /* 0..1 → 0..MAX_DETUNE_CENTS per chord step */
     float filter_cutoff;     /* 0..1 → exp 20..20kHz */
     float filter_resonance;  /* 0..1 → Q from FILTER_Q_MIN to FILTER_Q_MAX */
+    int   filter_mode;       /* 0..NUM_FILTER_MODES-1 */
     float drive;             /* 0..1 → 1..10x pre-tanh gain */
 
     SVF   filter;
@@ -269,16 +273,23 @@ static void filter_recompute(chordism_instance_t *inst) {
     inst->filter_a3 = g * inst->filter_a2;
 }
 
-/* TPT SVF lowpass: stable for any g (tan-mapped cutoff) and k (1/Q).
- * Andy Simper / Vadim Zavalishin formulation. */
-static inline float svf_lowpass(SVF *s, float input,
-                                float a1, float a2, float a3) {
+/* TPT SVF: stable for any g (tan-mapped cutoff) and k (1/Q).
+ * Andy Simper / Vadim Zavalishin formulation.
+ * mode: FILT_LP / FILT_HP / FILT_BP. */
+static inline float svf_process(SVF *s, float input, int mode,
+                                float a1, float a2, float a3, float k) {
     float v3 = input - s->ic2eq;
     float v1 = a1 * s->ic1eq + a2 * v3;
     float v2 = s->ic2eq + a2 * s->ic1eq + a3 * v3;
     s->ic1eq = 2.0f * v1 - s->ic1eq;
     s->ic2eq = 2.0f * v2 - s->ic2eq;
-    return v2;
+
+    switch (mode) {
+        case FILT_HP: return input - k * v1 - v2;
+        case FILT_BP: return v1;
+        case FILT_LP:
+        default:      return v2;
+    }
 }
 
 /* Reflective wavefolder — folds input back across [-1, +1] (Buchla style). */
@@ -446,6 +457,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->detune = 0.0f;
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
+    inst->filter_mode = FILT_LP;
     inst->drive = 0.0f;               /* clean by default */
     inst->filter.ic1eq = 0.0f;
     inst->filter.ic2eq = 0.0f;
@@ -542,6 +554,13 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         filter_recompute(inst);
     } else if (strcmp(key, "drive") == 0) {
         inst->drive = param_from_string(val, inst->drive);
+    } else if (strcmp(key, "filter_mode") == 0) {
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m >= NUM_FILTER_MODES) m = NUM_FILTER_MODES - 1;
+            inst->filter_mode = m;
+        }
     }
 }
 
@@ -575,8 +594,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->filter_resonance);
     } else if (key && strcmp(key, "drive") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->drive);
+    } else if (key && strcmp(key, "filter_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->filter_mode);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.10");
+        return snprintf(buf, buf_len, "0.0.11");
     }
     buf[0] = '\0';
     return 0;
@@ -657,10 +678,11 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         }
 
         /* Filter the post-mix signal. */
-        float filtered = svf_lowpass(&inst->filter, mix,
+        float filtered = svf_process(&inst->filter, mix, inst->filter_mode,
                                      inst->filter_a1,
                                      inst->filter_a2,
-                                     inst->filter_a3);
+                                     inst->filter_a3,
+                                     inst->filter_k);
 
         /* Drive — soft-clip via tanh. Gain ramps 1..10. At drive=0,
          * tanh(x) ≈ x for small x, transparent for typical synth levels. */
