@@ -48,11 +48,12 @@ static const host_api_v1_t *g_host = nullptr;
 static const float SAMPLE_RATE = 44100.0f;
 static const float TWO_PI = 6.28318530717958647692f;
 
-static const int   NUM_VOICES = 4;
+static const int   CHORD_SIZE = 4;
+static const int   NUM_VOICES = 8;   /* 2 banks of CHORD_SIZE — old chord can ring out while new chord plays */
 
 /* Placeholder chord — root + M3 + P5 + octave. The full chord LUT comes in
  * milestone 4. */
-static const int CHORD_INTERVALS_SEMITONES[NUM_VOICES] = { 0, 4, 7, 12 };
+static const int CHORD_INTERVALS_SEMITONES[CHORD_SIZE] = { 0, 4, 7, 12 };
 
 /* Attack range: 1 ms .. 4 s, linear ramp.
  * Release range: 5 ms .. 4 s, exponential decay (asymptotic). */
@@ -91,6 +92,7 @@ struct chordism_instance_t {
     float volume;
 
     Voice voices[NUM_VOICES];
+    int next_chord_base;   /* 0 or CHORD_SIZE — round-robin between voice banks */
 };
 
 /* ------------------------------------------------------------------------- */
@@ -140,22 +142,6 @@ static void release_all_voices(chordism_instance_t *inst) {
     }
 }
 
-/* Find a voice slot to assign — prefer fully-idle, otherwise steal whichever
- * has the lowest envelope value (least audible interruption). */
-static Voice* claim_voice_slot(chordism_instance_t *inst) {
-    Voice *best = &inst->voices[0];
-    float best_score = best->active ? best->env.value : -1.0f;
-    for (int i = 1; i < NUM_VOICES; ++i) {
-        Voice *v = &inst->voices[i];
-        float score = v->active ? v->env.value : -1.0f;
-        if (score < best_score) {
-            best = v;
-            best_score = score;
-        }
-    }
-    return best;
-}
-
 static void voice_start(chordism_instance_t *inst, Voice *v,
                         int root_note, int interval_semis, int velocity) {
     v->active = true;
@@ -172,16 +158,18 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
 }
 
 static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
-    /* Steal: release any currently-sounding chord. The released voices keep
-     * ringing through their decay while the new chord starts in parallel —
-     * masks click. */
+    /* Release the previously-active chord. Its voices keep ringing through
+     * their decay while the new chord starts in the *other* voice bank —
+     * masks retrigger click and lets release tails breathe. */
     release_all_voices(inst);
 
-    for (int i = 0; i < NUM_VOICES; ++i) {
-        Voice *target = claim_voice_slot(inst);
+    int base = inst->next_chord_base;
+    for (int i = 0; i < CHORD_SIZE; ++i) {
+        Voice *target = &inst->voices[base + i];
         voice_start(inst, target, root_note,
                     CHORD_INTERVALS_SEMITONES[i], velocity);
     }
+    inst->next_chord_base = (base + CHORD_SIZE) % NUM_VOICES;
 }
 
 static void chord_off(chordism_instance_t *inst, int root_note) {
@@ -297,11 +285,13 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     }
     auto *inst = (chordism_instance_t*)instance;
 
-    /* Sum across all voices, scale to int16. 4 voices summed at unit amplitude
-     * could peak at ±4.0; divide by NUM_VOICES so each voice contributes at
-     * 1/N. Then volume scales the mix. Keep 6 dB headroom against future
-     * polyphony — gain of 16000 instead of 32767. */
-    const float voice_gain = 1.0f / (float)NUM_VOICES;
+    /* Sum across voices. A chord is CHORD_SIZE voices at unit amplitude → peak
+     * ±CHORD_SIZE. With voice-steal banks, an overlapping release tail can add
+     * up to CHORD_SIZE more — so worst-case peak is NUM_VOICES units. Divide
+     * by CHORD_SIZE so the steady-state chord hits unit amplitude, then keep
+     * 6 dB headroom by scaling to 16000 instead of 32767 (clipping path
+     * catches the rare overlap-peak spikes). */
+    const float voice_gain = 1.0f / (float)CHORD_SIZE;
     const float master_gain = inst->volume * 16000.0f;
 
     for (int i = 0; i < frames; ++i) {
