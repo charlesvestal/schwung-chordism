@@ -49,7 +49,8 @@ static const float SAMPLE_RATE = 44100.0f;
 static const float TWO_PI = 6.28318530717958647692f;
 
 static const int   CHORD_SIZE = 4;
-static const int   NUM_VOICES = 8;   /* 2 banks of CHORD_SIZE — old chord can ring out while new chord plays */
+static const int   NUM_VOICES = 16;  /* 4 banks of CHORD_SIZE — release tails finish before steal */
+static const int   HELD_STACK_MAX = 16;
 
 /* Chord LUT — DVNA-spec chord types. Each row is CHORD_SIZE semitone offsets
  * from the root note (in MIDI semitones, so 12 = octave). */
@@ -197,6 +198,14 @@ static const float SWEEP_MAX_SEMITONES = 12.0f;
 static const float SWEEP_TIME_MIN_S = 0.01f;
 static const float SWEEP_TIME_MAX_S = 4.0f;
 
+/* Glide: portamento time at rate=1.0 (rate=0 → snap). */
+static const float GLIDE_TIME_MAX_S = 2.0f;
+
+enum ArpDirection { ARP_UP = 0, ARP_DOWN, ARP_UPDOWN, ARP_RANDOM };
+static const int NUM_ARP_DIRECTIONS = 4;
+static const float ARP_BPM_MIN = 30.0f;
+static const float ARP_BPM_MAX = 240.0f;
+
 /* Filter cutoff range, exp-mapped 0..1 → 20 Hz .. 20 kHz. TPT SVF is stable
  * up to Nyquist but tan() blows up exactly AT Nyquist — keep cutoff under
  * 0.49 * SR. */
@@ -258,6 +267,8 @@ struct Voice {
     int waveform;        /* per-voice waveform — set at voice_start */
     float phase;
     float phase_inc;
+    float target_phase_inc;  /* glide target — phase_inc ramps toward this */
+    float glide_step;        /* per-sample addition; 0 = no glide */
     float velocity;
     float pan_offset;    /* (chord_step_norm - 0.5), -0.5..+0.5. Pan scales by inst->width per sample. */
     AREnv env;
@@ -346,7 +357,28 @@ struct chordism_instance_t {
 
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
-    int next_chord_base;   /* 0 or CHORD_SIZE — round-robin between voice banks */
+    int next_chord_base;   /* 0, 4, 8, 12 — round-robin between voice banks */
+
+    /* Held-note stack — mono priority with note-off return-to-previously-held. */
+    int held_notes[HELD_STACK_MAX];
+    int held_count;
+
+    /* Aftertouch (channel pressure). Routed to vibrato depth boost. */
+    float aftertouch;
+
+    /* Glide */
+    float glide_rate;                       /* 0..1 → 0..GLIDE_TIME_MAX_S */
+    bool  has_prev_chord;                   /* false until first chord_on completes */
+    float prev_phase_inc[CHORD_SIZE];       /* last chord's per-step base phase_inc */
+
+    /* Arpeggiator */
+    int   arp_enabled;                      /* 0/1 */
+    float arp_tempo;                        /* 0..1 → 30..240 BPM */
+    int   arp_direction;                    /* 0=up, 1=down, 2=updown, 3=random */
+    int   arp_step_idx;
+    int   arp_step_dir;                     /* +1 or -1 (for updown) */
+    int   arp_sample_counter;
+    int   arp_step_period;                  /* samples per arp step */
 };
 
 /* ------------------------------------------------------------------------- */
@@ -471,6 +503,15 @@ static void vibrato_recompute(chordism_instance_t *inst) {
     float delay_samples = delay_s * SAMPLE_RATE;
     if (delay_samples < 1.0f) delay_samples = 1.0f;
     inst->vib_ramp_inc = 1.0f / delay_samples;
+}
+
+static void arp_recompute(chordism_instance_t *inst) {
+    float bpm = ARP_BPM_MIN + (ARP_BPM_MAX - ARP_BPM_MIN) * inst->arp_tempo;
+    /* Quarter note period in samples = 60/BPM * SR. */
+    float period = (60.0f / bpm) * SAMPLE_RATE;
+    int p = (int)period;
+    if (p < 64) p = 64;
+    inst->arp_step_period = p;
 }
 
 static void sweep_recompute(chordism_instance_t *inst) {
@@ -666,7 +707,24 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
     if (detune_cents != 0.0f) {
         hz *= powf(2.0f, detune_cents / 1200.0f);
     }
-    v->phase_inc = hz / SAMPLE_RATE;
+    float target_inc = hz / SAMPLE_RATE;
+    v->target_phase_inc = target_inc;
+
+    if (inst->has_prev_chord && inst->glide_rate > 0.0f) {
+        /* Glide: start at the previous chord's pitch for this step, ramp
+         * linearly to the new target over glide_rate * GLIDE_TIME_MAX_S
+         * seconds. */
+        float start = inst->prev_phase_inc[chord_step];
+        float glide_s = inst->glide_rate * GLIDE_TIME_MAX_S;
+        float glide_samples = glide_s * SAMPLE_RATE;
+        if (glide_samples < 1.0f) glide_samples = 1.0f;
+        v->phase_inc = start;
+        v->glide_step = (target_inc - start) / glide_samples;
+    } else {
+        v->phase_inc = target_inc;
+        v->glide_step = 0.0f;
+    }
+
     v->velocity = (float)velocity / 127.0f;
 
     /* Pan offset is fixed per voice (chord position). The render loop applies
@@ -703,6 +761,12 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
     }
     inst->next_chord_base = (base + CHORD_SIZE) % NUM_VOICES;
 
+    /* Save this chord's per-step target as the glide source for the next chord. */
+    for (int i = 0; i < CHORD_SIZE; ++i) {
+        inst->prev_phase_inc[i] = inst->voices[base + i].target_phase_inc;
+    }
+    inst->has_prev_chord = true;
+
     /* Re-trigger filter envelope from the start (hard reset to 0). */
     aenv_recompute_rates(&inst->filter_env,
                          inst->filter_env_attack, inst->filter_env_decay);
@@ -727,6 +791,40 @@ static void chord_off(chordism_instance_t *inst, int root_note) {
             v->env.stage = ENV_RELEASE;
         }
     }
+}
+
+/* Held-note stack helpers. */
+static void held_push(chordism_instance_t *inst, int note) {
+    /* Remove any previous occurrence so duplicates don't pile up. */
+    for (int i = 0; i < inst->held_count; ++i) {
+        if (inst->held_notes[i] == note) {
+            for (int j = i; j < inst->held_count - 1; ++j) {
+                inst->held_notes[j] = inst->held_notes[j + 1];
+            }
+            inst->held_count--;
+            break;
+        }
+    }
+    if (inst->held_count < HELD_STACK_MAX) {
+        inst->held_notes[inst->held_count++] = note;
+    }
+}
+
+/* Returns true if note was on top of stack (currently playing); false if it
+ * was elsewhere or absent. */
+static bool held_pop(chordism_instance_t *inst, int note) {
+    if (inst->held_count == 0) return false;
+    int top = inst->held_notes[inst->held_count - 1];
+    for (int i = 0; i < inst->held_count; ++i) {
+        if (inst->held_notes[i] == note) {
+            for (int j = i; j < inst->held_count - 1; ++j) {
+                inst->held_notes[j] = inst->held_notes[j + 1];
+            }
+            inst->held_count--;
+            return (note == top);
+        }
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -765,6 +863,18 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->sweep_rate = 0.5f;
     inst->sweep_value = 0.0f;
     sweep_recompute(inst);
+    inst->held_count = 0;
+    inst->aftertouch = 0.0f;
+    inst->glide_rate = 0.0f;
+    inst->has_prev_chord = false;
+    for (int i = 0; i < CHORD_SIZE; ++i) inst->prev_phase_inc[i] = 0.0f;
+    inst->arp_enabled = 0;
+    inst->arp_tempo = 0.4f;            /* ~120 BPM */
+    inst->arp_direction = ARP_UP;
+    inst->arp_step_idx = 0;
+    inst->arp_step_dir = 1;
+    inst->arp_sample_counter = 0;
+    arp_recompute(inst);
     inst->reverb_mix = 0.0f;          /* dry by default */
     inst->reverb_decay = 0.5f;
     inst->reverb_damp = 0.3f;
@@ -830,10 +940,38 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     uint8_t d2 = msg[2] & 0x7F;
 
     if (status == 0x90 && d2 > 0) {
-        chord_on(inst, d1, d2);
+        held_push(inst, d1);
+        if (inst->arp_enabled) {
+            /* Fire this note immediately, then schedule next arp tick. */
+            chord_on(inst, d1, d2);
+            inst->arp_step_idx = inst->held_count - 1;
+            inst->arp_step_dir = 1;
+            inst->arp_sample_counter = inst->arp_step_period;
+        } else {
+            chord_on(inst, d1, d2);
+        }
     } else if (status == 0x80 || (status == 0x90 && d2 == 0)) {
-        chord_off(inst, d1);
+        bool was_top = held_pop(inst, d1);
+        if (inst->arp_enabled) {
+            /* Arp keeps cycling — don't retrigger here. If stack empties,
+             * arp will simply stop firing until next note-on. */
+            if (inst->held_count == 0) {
+                chord_off(inst, d1);
+            }
+        } else if (was_top) {
+            /* Mono-priority return to previously-held. */
+            if (inst->held_count > 0) {
+                int prev = inst->held_notes[inst->held_count - 1];
+                chord_on(inst, prev, 100);
+            } else {
+                chord_off(inst, d1);
+            }
+        }
+    } else if (status == 0xD0) {
+        /* Channel aftertouch — single-byte pressure in d1. */
+        inst->aftertouch = (float)d1 / 127.0f;
     } else if (status == 0xB0 && d1 == 123) {
+        inst->held_count = 0;
         release_all_voices(inst);
     }
 }
@@ -978,6 +1116,27 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         inst->delay_feedback = param_from_string(val, inst->delay_feedback);
     } else if (strcmp(key, "delay_tone") == 0) {
         inst->delay_tone = param_from_string(val, inst->delay_tone);
+    } else if (strcmp(key, "glide_rate") == 0) {
+        inst->glide_rate = param_from_string(val, inst->glide_rate);
+    } else if (strcmp(key, "arp_enabled") == 0) {
+        if (val) {
+            int e = atoi(val);
+            inst->arp_enabled = e ? 1 : 0;
+            if (!inst->arp_enabled) {
+                inst->arp_sample_counter = 0;
+            }
+        }
+    } else if (strcmp(key, "arp_tempo") == 0) {
+        inst->arp_tempo = param_from_string(val, inst->arp_tempo);
+        arp_recompute(inst);
+    } else if (strcmp(key, "arp_direction") == 0) {
+        if (val) {
+            int d = atoi(val);
+            if (d < 0) d = 0;
+            if (d >= NUM_ARP_DIRECTIONS) d = NUM_ARP_DIRECTIONS - 1;
+            inst->arp_direction = d;
+            inst->arp_step_dir = 1;
+        }
     }
 }
 
@@ -999,7 +1158,8 @@ static const char *ui_hierarchy_json =
         "{\"level\":\"mod\",\"label\":\"Modulation\"},"
         "{\"level\":\"env\",\"label\":\"Envelope\"},"
         "{\"level\":\"fx\",\"label\":\"FX\"},"
-        "{\"level\":\"delay\",\"label\":\"Delay\"}"
+        "{\"level\":\"delay\",\"label\":\"Delay\"},"
+        "{\"level\":\"arp\",\"label\":\"Arp\"}"
       "]"
     "},"
     "\"osc\":{"
@@ -1019,8 +1179,8 @@ static const char *ui_hierarchy_json =
     "\"mod\":{"
       "\"name\":\"Modulation\","
       "\"children\":null,"
-      "\"knobs\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"sweep_amount\",\"sweep_rate\",\"detune\"],"
-      "\"params\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"vib_delay\",\"sweep_amount\",\"sweep_rate\",\"detune\"],"
+      "\"knobs\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"sweep_amount\",\"glide_rate\",\"detune\"],"
+      "\"params\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"vib_delay\",\"sweep_amount\",\"sweep_rate\",\"glide_rate\",\"detune\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"env\":{"
@@ -1042,6 +1202,13 @@ static const char *ui_hierarchy_json =
       "\"children\":null,"
       "\"knobs\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone\"],"
       "\"params\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"arp\":{"
+      "\"name\":\"Arp\","
+      "\"children\":null,"
+      "\"knobs\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\"],"
+      "\"params\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\"],"
       "\"navigate_to\":\"root\""
     "}"
   "}"
@@ -1087,7 +1254,11 @@ static const char *chain_params_json =
   "{\"key\":\"delay_mix\",\"name\":\"Dly Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"delay_time\",\"name\":\"Dly Time\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
   "{\"key\":\"delay_feedback\",\"name\":\"Dly Fbk\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.4},"
-  "{\"key\":\"delay_tone\",\"name\":\"Dly Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.7}"
+  "{\"key\":\"delay_tone\",\"name\":\"Dly Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.7},"
+  "{\"key\":\"glide_rate\",\"name\":\"Glide\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"arp_enabled\",\"name\":\"Arp\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
+  "{\"key\":\"arp_tempo\",\"name\":\"Arp Tempo\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.4},"
+  "{\"key\":\"arp_direction\",\"name\":\"Arp Dir\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\",\"Up/Down\",\"Random\"],\"default\":0}"
 "]";
 
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
@@ -1182,8 +1353,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->delay_feedback);
     } else if (key && strcmp(key, "delay_tone") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->delay_tone);
+    } else if (key && strcmp(key, "glide_rate") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->glide_rate);
+    } else if (key && strcmp(key, "arp_enabled") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_enabled);
+    } else if (key && strcmp(key, "arp_tempo") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->arp_tempo);
+    } else if (key && strcmp(key, "arp_direction") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_direction);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.1.0");
+        return snprintf(buf, buf_len, "0.1.1");
     }
     buf[0] = '\0';
     return 0;
@@ -1216,6 +1395,46 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     LFO *lfo = &inst->shape_lfo;
 
     for (int i = 0; i < frames; ++i) {
+        /* Arp tick: if enabled and any notes are held, count down samples
+         * to next step and advance pattern. */
+        if (inst->arp_enabled && inst->held_count > 0) {
+            inst->arp_sample_counter--;
+            if (inst->arp_sample_counter <= 0) {
+                inst->arp_sample_counter = inst->arp_step_period;
+                /* Advance step_idx according to direction. */
+                int hc = inst->held_count;
+                switch (inst->arp_direction) {
+                    case ARP_UP:
+                        inst->arp_step_idx = (inst->arp_step_idx + 1) % hc;
+                        break;
+                    case ARP_DOWN:
+                        inst->arp_step_idx--;
+                        if (inst->arp_step_idx < 0) inst->arp_step_idx = hc - 1;
+                        break;
+                    case ARP_UPDOWN:
+                        if (hc <= 1) {
+                            inst->arp_step_idx = 0;
+                        } else {
+                            inst->arp_step_idx += inst->arp_step_dir;
+                            if (inst->arp_step_idx >= hc) {
+                                inst->arp_step_idx = hc - 2;
+                                inst->arp_step_dir = -1;
+                            } else if (inst->arp_step_idx < 0) {
+                                inst->arp_step_idx = 1;
+                                inst->arp_step_dir = 1;
+                            }
+                        }
+                        break;
+                    case ARP_RANDOM:
+                        inst->arp_step_idx = rand() % hc;
+                        break;
+                }
+                if (inst->arp_step_idx < 0) inst->arp_step_idx = 0;
+                if (inst->arp_step_idx >= hc) inst->arp_step_idx = hc - 1;
+                chord_on(inst, inst->held_notes[inst->arp_step_idx], 100);
+            }
+        }
+
         /* Advance shape LFO, compute effective shape value for this sample. */
         lfo->phase += lfo->phase_inc;
         if (lfo->phase >= 1.0f) lfo->phase -= 1.0f;
@@ -1231,9 +1450,13 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             inst->vib_ramp_value += inst->vib_ramp_inc;
             if (inst->vib_ramp_value > 1.0f) inst->vib_ramp_value = 1.0f;
         }
+        /* Aftertouch additively boosts vibrato depth (clamped to 0..1). */
+        float vib_depth_eff = inst->vib_depth + inst->aftertouch * 0.5f;
+        if (vib_depth_eff > 1.0f) vib_depth_eff = 1.0f;
+
         float vib_cents = sinf(TWO_PI * inst->vibrato_phase)
                           * inst->vib_ramp_value
-                          * inst->vib_depth * VIB_DEPTH_MAX_CENTS;
+                          * vib_depth_eff * VIB_DEPTH_MAX_CENTS;
 
         /* Pitch sweep: exp decay toward 0. */
         if (inst->sweep_value != 0.0f) {
@@ -1280,6 +1503,16 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             }
 
             if (!v->active) continue;
+
+            /* Glide: ramp phase_inc toward target. */
+            if (v->glide_step != 0.0f) {
+                v->phase_inc += v->glide_step;
+                if ((v->glide_step > 0.0f && v->phase_inc >= v->target_phase_inc) ||
+                    (v->glide_step < 0.0f && v->phase_inc <= v->target_phase_inc)) {
+                    v->phase_inc = v->target_phase_inc;
+                    v->glide_step = 0.0f;
+                }
+            }
 
             float inc = v->phase_inc * vib_ratio;
             float s = osc_sample(v->waveform, v->phase, inc, effective_shape);
