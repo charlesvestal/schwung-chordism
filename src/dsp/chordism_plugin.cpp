@@ -344,8 +344,19 @@ static const int NUM_FILTER_MODES = 3;
 
 enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_RELEASE };
 
-enum Waveform { WAVE_OFF = 0, WAVE_SINE = 1, WAVE_TRIANGLE = 2, WAVE_SAW = 3, WAVE_SQUARE = 4 };
-static const int NUM_WAVEFORMS = 5;
+enum Waveform {
+    WAVE_OFF = 0,
+    WAVE_SINE = 1,
+    WAVE_TRIANGLE = 2,
+    WAVE_SAW = 3,
+    WAVE_SQUARE = 4,
+    WAVE_PULSE_TRAIN = 5,
+    WAVE_WAVETABLE = 6
+};
+static const int NUM_WAVEFORMS = 7;
+
+enum LfoMode { LFOMODE_FREE = 0, LFOMODE_NOTE_RESET = 1, LFOMODE_ONE_SHOT = 2 };
+static const int NUM_LFO_MODES = 3;
 
 enum LFOShape { LFO_TRIANGLE = 0, LFO_RAMP_UP = 1, LFO_RAMP_DOWN = 2, LFO_SQUARE = 3 };
 static const int NUM_LFO_SHAPES = 4;
@@ -426,6 +437,30 @@ struct chordism_instance_t {
     /* Per-osc enable bitmasks for vibrato and pitch sweep. 1 bit per chord step. */
     int   vib_osc_enable;     /* low 4 bits, 1=enabled per step */
     int   sweep_osc_enable;
+
+    /* LFO mode for each LFO (free / note-reset / one-shot). */
+    int   shape_lfo_mode;
+    int   filter_lfo_mode;
+    int   lm_lfo_mode;
+    int   pm_lfo_mode;
+    bool  shape_lfo_done;
+    bool  filter_lfo_done;
+    bool  lm_lfo_done;
+    bool  pm_lfo_done;
+
+    /* FM position: 0 = pre-level-morph (FM amount constant), 1 = post-level-morph
+     * (FM amount scales with carrier level, varies with morph). */
+    int   fm_position;
+
+    /* Arp: Hold, Euclidean, variation transpose. */
+    int   arp_hold;
+    int   arp_euclid_steps;     /* 1..16 */
+    int   arp_euclid_beats;     /* 0..steps (0 = euclidean off) */
+    int   arp_variation_interval; /* -12..+12 semis */
+    int   arp_variations;       /* 1..8 (1 = no variation) */
+    bool  arp_pattern[16];      /* precomputed from euclid steps/beats */
+    int   arp_pattern_pos;      /* current position within euclid pattern */
+    int   arp_variation_idx;    /* 0..arp_variations-1 */
 
     /* Level morph LFO — animates morph_index continuously. */
     float lm_lfo_rate;
@@ -887,6 +922,26 @@ static void arp_recompute(chordism_instance_t *inst) {
     inst->arp_step_period = p;
 }
 
+/* Euclidean rhythm — distribute beats evenly across steps using
+ * (i*beats)/steps modular comparison. */
+static void arp_euclid_recompute(chordism_instance_t *inst) {
+    int s = inst->arp_euclid_steps;
+    int b = inst->arp_euclid_beats;
+    if (s < 1) s = 1;
+    if (s > 16) s = 16;
+    if (b < 0) b = 0;
+    if (b > s) b = s;
+    for (int i = 0; i < 16; ++i) {
+        if (i >= s) { inst->arp_pattern[i] = false; continue; }
+        if (b == 0) {
+            /* 0 beats = all-on pattern (treat 0 as "no euclidean filtering"). */
+            inst->arp_pattern[i] = true;
+            continue;
+        }
+        inst->arp_pattern[i] = (((i * b) % s) < b);
+    }
+}
+
 static void sweep_recompute(chordism_instance_t *inst) {
     /* Time exp-mapped: rate=0 → slow (4s), rate=1 → fast (10ms). */
     float ratio = SWEEP_TIME_MAX_S / SWEEP_TIME_MIN_S;
@@ -1001,6 +1056,30 @@ static float osc_sample(int waveform, float phase, float phase_inc, float shape)
             s += poly_blep(phase, phase_inc);
             s -= poly_blep(t2, phase_inc);
             return s;
+        }
+
+        case WAVE_PULSE_TRAIN: {
+            /* Narrow pulse train: PWM constrained to 2%..30% — thinner and
+             * buzzier than the regular Square's full PWM range. */
+            float pw = 0.02f + shape * 0.28f;
+            float t2 = phase + (1.0f - pw);
+            if (t2 >= 1.0f) t2 -= 1.0f;
+            float s = (phase < pw) ? 1.0f : -1.0f;
+            s += poly_blep(phase, phase_inc);
+            s -= poly_blep(t2, phase_inc);
+            return s;
+        }
+
+        case WAVE_WAVETABLE: {
+            /* Sum-of-harmonics with shape-controlled bandwidth. Up to 8
+             * partials. Cheaper than embedding a real wavetable, and lets
+             * shape act as a brightness control. */
+            float s = sinf(TWO_PI * phase);
+            int N = 1 + (int)(shape * 7.0f);   /* 1..8 partials */
+            for (int h = 2; h <= N; ++h) {
+                s += sinf(TWO_PI * phase * (float)h) / (float)h;
+            }
+            return s * 0.5f;   /* approximate normalization */
         }
 
         default:
@@ -1187,6 +1266,25 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
 
     /* Re-trigger pitch sweep: start at full offset. */
     inst->sweep_value = inst->sweep_amount * SWEEP_MAX_SEMITONES;
+
+    /* LFO mode: note-reset and one-shot both reset phase and clear the
+     * "done" latch (one-shot will re-arm on next note). */
+    if (inst->shape_lfo_mode != LFOMODE_FREE) {
+        inst->shape_lfo.phase = 0.0f;
+        inst->shape_lfo_done = false;
+    }
+    if (inst->filter_lfo_mode != LFOMODE_FREE) {
+        inst->filter_lfo_phase = 0.0f;
+        inst->filter_lfo_done = false;
+    }
+    if (inst->lm_lfo_mode != LFOMODE_FREE) {
+        inst->lm_lfo_phase = 0.0f;
+        inst->lm_lfo_done = false;
+    }
+    if (inst->pm_lfo_mode != LFOMODE_FREE) {
+        inst->pm_lfo_phase = 0.0f;
+        inst->pm_lfo_done = false;
+    }
 }
 
 static void chord_off(chordism_instance_t *inst, int root_note) {
@@ -1340,7 +1438,24 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->arp_step_idx = 0;
     inst->arp_step_dir = 1;
     inst->arp_sample_counter = 0;
+    inst->arp_hold = 0;
+    inst->arp_euclid_steps = 16;
+    inst->arp_euclid_beats = 0;   /* 0 = all-on (no euclidean filtering) */
+    inst->arp_variation_interval = 0;
+    inst->arp_variations = 1;
+    inst->arp_pattern_pos = 0;
+    inst->arp_variation_idx = 0;
+    inst->shape_lfo_mode = LFOMODE_FREE;
+    inst->filter_lfo_mode = LFOMODE_FREE;
+    inst->lm_lfo_mode = LFOMODE_FREE;
+    inst->pm_lfo_mode = LFOMODE_FREE;
+    inst->shape_lfo_done = false;
+    inst->filter_lfo_done = false;
+    inst->lm_lfo_done = false;
+    inst->pm_lfo_done = false;
+    inst->fm_position = 0;
     arp_recompute(inst);
+    arp_euclid_recompute(inst);
     inst->reverb_mix = 0.0f;          /* dry by default */
     inst->reverb_decay = 0.5f;
     inst->reverb_damp = 0.3f;
@@ -1433,6 +1548,10 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
             chord_on(inst, d1, d2);
         }
     } else if (status == 0x80 || (status == 0x90 && d2 == 0)) {
+        /* Arp Hold: latch held notes; ignore note-off. */
+        if (inst->arp_enabled && inst->arp_hold) {
+            return;
+        }
         bool was_top = held_pop(inst, d1);
         if (inst->arp_enabled) {
             /* Arp keeps cycling — don't retrigger here. If stack empties,
@@ -1759,6 +1878,68 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->arp_direction = d;
             inst->arp_step_dir = 1;
         }
+    } else if (strcmp(key, "arp_hold") == 0) {
+        if (val) inst->arp_hold = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "arp_euclid_steps") == 0) {
+        if (val) {
+            int s = atoi(val);
+            if (s < 1) s = 1;
+            if (s > 16) s = 16;
+            inst->arp_euclid_steps = s;
+            arp_euclid_recompute(inst);
+        }
+    } else if (strcmp(key, "arp_euclid_beats") == 0) {
+        if (val) {
+            int b = atoi(val);
+            if (b < 0) b = 0;
+            if (b > inst->arp_euclid_steps) b = inst->arp_euclid_steps;
+            inst->arp_euclid_beats = b;
+            arp_euclid_recompute(inst);
+        }
+    } else if (strcmp(key, "arp_variation_interval") == 0) {
+        if (val) {
+            int v = atoi(val);
+            if (v < -12) v = -12;
+            if (v > 12) v = 12;
+            inst->arp_variation_interval = v;
+        }
+    } else if (strcmp(key, "arp_variations") == 0) {
+        if (val) {
+            int v = atoi(val);
+            if (v < 1) v = 1;
+            if (v > 8) v = 8;
+            inst->arp_variations = v;
+        }
+    } else if (strcmp(key, "shape_lfo_mode") == 0) {
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m >= NUM_LFO_MODES) m = NUM_LFO_MODES - 1;
+            inst->shape_lfo_mode = m;
+        }
+    } else if (strcmp(key, "filter_lfo_mode") == 0) {
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m >= NUM_LFO_MODES) m = NUM_LFO_MODES - 1;
+            inst->filter_lfo_mode = m;
+        }
+    } else if (strcmp(key, "lm_lfo_mode") == 0) {
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m >= NUM_LFO_MODES) m = NUM_LFO_MODES - 1;
+            inst->lm_lfo_mode = m;
+        }
+    } else if (strcmp(key, "pm_lfo_mode") == 0) {
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m >= NUM_LFO_MODES) m = NUM_LFO_MODES - 1;
+            inst->pm_lfo_mode = m;
+        }
+    } else if (strcmp(key, "fm_position") == 0) {
+        if (val) inst->fm_position = atoi(val) ? 1 : 0;
     }
 }
 
@@ -1835,8 +2016,8 @@ static const char *ui_hierarchy_json =
     "\"arp\":{"
       "\"name\":\"Arp\","
       "\"children\":null,"
-      "\"knobs\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\"],"
-      "\"params\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\"],"
+      "\"knobs\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\",\"arp_hold\",\"arp_euclid_steps\",\"arp_euclid_beats\",\"arp_variation_interval\",\"arp_variations\"],"
+      "\"params\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\",\"arp_hold\",\"arp_euclid_steps\",\"arp_euclid_beats\",\"arp_variation_interval\",\"arp_variations\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"morph\":{"
@@ -1875,10 +2056,10 @@ static const char *chain_params_json =
   "{\"key\":\"filter_env_depth\",\"name\":\"Env Amt\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
   "{\"key\":\"drive\",\"name\":\"Drive\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"volume\",\"name\":\"Volume\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.02,\"default\":0.8},"
-  "{\"key\":\"wave_1\",\"name\":\"Wave 1\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":1},"
-  "{\"key\":\"wave_2\",\"name\":\"Wave 2\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":1},"
-  "{\"key\":\"wave_3\",\"name\":\"Wave 3\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":1},"
-  "{\"key\":\"wave_4\",\"name\":\"Wave 4\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":1},"
+  "{\"key\":\"wave_1\",\"name\":\"Wave 1\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\",\"Pulse Tr\",\"Wavetable\"],\"default\":1},"
+  "{\"key\":\"wave_2\",\"name\":\"Wave 2\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\",\"Pulse Tr\",\"Wavetable\"],\"default\":1},"
+  "{\"key\":\"wave_3\",\"name\":\"Wave 3\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\",\"Pulse Tr\",\"Wavetable\"],\"default\":1},"
+  "{\"key\":\"wave_4\",\"name\":\"Wave 4\",\"type\":\"enum\",\"options\":[\"Off\",\"Sine\",\"Triangle\",\"Saw\",\"Square\",\"Pulse Tr\",\"Wavetable\"],\"default\":1},"
   "{\"key\":\"shape\",\"name\":\"Shape\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"shape_1\",\"name\":\"Shape 1\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"shape_2\",\"name\":\"Shape 2\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
@@ -1947,6 +2128,16 @@ static const char *chain_params_json =
   "{\"key\":\"mix_4\",\"name\":\"Mix 4\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":1},"
   "{\"key\":\"vib_osc_enable\",\"name\":\"Vib Osc\",\"type\":\"int\",\"min\":0,\"max\":15,\"step\":1,\"default\":15},"
   "{\"key\":\"sweep_osc_enable\",\"name\":\"Swp Osc\",\"type\":\"int\",\"min\":0,\"max\":15,\"step\":1,\"default\":15},"
+  "{\"key\":\"shape_lfo_mode\",\"name\":\"LFO Mode\",\"type\":\"enum\",\"options\":[\"Free\",\"Note Reset\",\"One Shot\"],\"default\":0},"
+  "{\"key\":\"filter_lfo_mode\",\"name\":\"FLfo Mode\",\"type\":\"enum\",\"options\":[\"Free\",\"Note Reset\",\"One Shot\"],\"default\":0},"
+  "{\"key\":\"lm_lfo_mode\",\"name\":\"LM Lfo Md\",\"type\":\"enum\",\"options\":[\"Free\",\"Note Reset\",\"One Shot\"],\"default\":0},"
+  "{\"key\":\"pm_lfo_mode\",\"name\":\"PM Lfo Md\",\"type\":\"enum\",\"options\":[\"Free\",\"Note Reset\",\"One Shot\"],\"default\":0},"
+  "{\"key\":\"fm_position\",\"name\":\"FM Pos\",\"type\":\"enum\",\"options\":[\"Pre-Morph\",\"Post-Morph\"],\"default\":0},"
+  "{\"key\":\"arp_hold\",\"name\":\"Arp Hold\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
+  "{\"key\":\"arp_euclid_steps\",\"name\":\"Eucl Step\",\"type\":\"int\",\"min\":1,\"max\":16,\"step\":1,\"default\":16},"
+  "{\"key\":\"arp_euclid_beats\",\"name\":\"Eucl Beat\",\"type\":\"int\",\"min\":0,\"max\":16,\"step\":1,\"default\":0},"
+  "{\"key\":\"arp_variation_interval\",\"name\":\"Var Int\",\"type\":\"int\",\"min\":-12,\"max\":12,\"step\":1,\"default\":0},"
+  "{\"key\":\"arp_variations\",\"name\":\"Var Num\",\"type\":\"int\",\"min\":1,\"max\":8,\"step\":1,\"default\":1},"
   "{\"key\":\"arp_enabled\",\"name\":\"Arp\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
   "{\"key\":\"arp_tempo\",\"name\":\"Arp Tempo\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.4},"
   "{\"key\":\"arp_direction\",\"name\":\"Arp Dir\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\",\"Up/Down\",\"Random\"],\"default\":0}"
@@ -2147,8 +2338,28 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->arp_tempo);
     } else if (key && strcmp(key, "arp_direction") == 0) {
         return snprintf(buf, buf_len, "%d", inst->arp_direction);
+    } else if (key && strcmp(key, "arp_hold") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_hold);
+    } else if (key && strcmp(key, "arp_euclid_steps") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_euclid_steps);
+    } else if (key && strcmp(key, "arp_euclid_beats") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_euclid_beats);
+    } else if (key && strcmp(key, "arp_variation_interval") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_variation_interval);
+    } else if (key && strcmp(key, "arp_variations") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_variations);
+    } else if (key && strcmp(key, "shape_lfo_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->shape_lfo_mode);
+    } else if (key && strcmp(key, "filter_lfo_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->filter_lfo_mode);
+    } else if (key && strcmp(key, "lm_lfo_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lm_lfo_mode);
+    } else if (key && strcmp(key, "pm_lfo_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pm_lfo_mode);
+    } else if (key && strcmp(key, "fm_position") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->fm_position);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.3.0");
+        return snprintf(buf, buf_len, "0.3.1");
     }
     buf[0] = '\0';
     return 0;
@@ -2184,14 +2395,32 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
      * gains using effective index = base + LFO * depth. Block-rate update is
      * inaudible for slow LFOs and dramatically cheaper than per-sample. */
     if (inst->lm_lfo_depth > 0.0f) {
-        inst->lm_lfo_phase += inst->lm_lfo_phase_inc * (float)frames;
-        while (inst->lm_lfo_phase >= 1.0f) inst->lm_lfo_phase -= 1.0f;
+        if (!inst->lm_lfo_done) {
+            inst->lm_lfo_phase += inst->lm_lfo_phase_inc * (float)frames;
+            if (inst->lm_lfo_phase >= 1.0f) {
+                if (inst->lm_lfo_mode == LFOMODE_ONE_SHOT) {
+                    inst->lm_lfo_phase = 1.0f;
+                    inst->lm_lfo_done = true;
+                } else {
+                    while (inst->lm_lfo_phase >= 1.0f) inst->lm_lfo_phase -= 1.0f;
+                }
+            }
+        }
         float lm_val = lfo_sample(inst->lm_lfo_shape, inst->lm_lfo_phase) * inst->lm_lfo_depth;
         morph_recompute_at(inst, inst->morph_index + lm_val * 0.5f);
     }
     if (inst->pm_lfo_depth > 0.0f) {
-        inst->pm_lfo_phase += inst->pm_lfo_phase_inc * (float)frames;
-        while (inst->pm_lfo_phase >= 1.0f) inst->pm_lfo_phase -= 1.0f;
+        if (!inst->pm_lfo_done) {
+            inst->pm_lfo_phase += inst->pm_lfo_phase_inc * (float)frames;
+            if (inst->pm_lfo_phase >= 1.0f) {
+                if (inst->pm_lfo_mode == LFOMODE_ONE_SHOT) {
+                    inst->pm_lfo_phase = 1.0f;
+                    inst->pm_lfo_done = true;
+                } else {
+                    while (inst->pm_lfo_phase >= 1.0f) inst->pm_lfo_phase -= 1.0f;
+                }
+            }
+        }
         float pm_val = lfo_sample(inst->pm_lfo_shape, inst->pm_lfo_phase) * inst->pm_lfo_depth;
         pan_morph_recompute_at(inst, inst->pan_morph_index + pm_val * 0.5f);
     }
@@ -2233,13 +2462,42 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 }
                 if (inst->arp_step_idx < 0) inst->arp_step_idx = 0;
                 if (inst->arp_step_idx >= hc) inst->arp_step_idx = hc - 1;
-                chord_on(inst, inst->held_notes[inst->arp_step_idx], 100);
+
+                /* Euclidean: advance pattern position, only fire chord_on if
+                 * the corresponding step is "on". With beats=0 we treat the
+                 * pattern as all-on (no filtering). */
+                bool fire = inst->arp_pattern[inst->arp_pattern_pos];
+                inst->arp_pattern_pos = (inst->arp_pattern_pos + 1) % inst->arp_euclid_steps;
+
+                /* Variation: rotate through transpose intervals when the
+                 * arp completes a full cycle (we approximate by incrementing
+                 * variation_idx every time pattern_pos wraps to 0). */
+                if (inst->arp_pattern_pos == 0 && inst->arp_variations > 1) {
+                    inst->arp_variation_idx = (inst->arp_variation_idx + 1) % inst->arp_variations;
+                }
+
+                if (fire) {
+                    int note = inst->held_notes[inst->arp_step_idx]
+                             + inst->arp_variation_idx * inst->arp_variation_interval;
+                    if (note < 0) note = 0;
+                    if (note > 127) note = 127;
+                    chord_on(inst, note, 100);
+                }
             }
         }
 
         /* Advance shape LFO, compute effective shape offset for this sample. */
-        lfo->phase += lfo->phase_inc;
-        if (lfo->phase >= 1.0f) lfo->phase -= 1.0f;
+        if (!inst->shape_lfo_done) {
+            lfo->phase += lfo->phase_inc;
+            if (lfo->phase >= 1.0f) {
+                if (inst->shape_lfo_mode == LFOMODE_ONE_SHOT) {
+                    lfo->phase = 1.0f;
+                    inst->shape_lfo_done = true;
+                } else {
+                    lfo->phase -= 1.0f;
+                }
+            }
+        }
         float shape_lfo_offset = lfo_sample(lfo->shape, lfo->phase) * inst->lfo_depth;
 
         /* Advance vibrato LFO + delay ramp, compute pitch-shift ratio. */
@@ -2379,7 +2637,17 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             else if (v->phase < 0.0f) v->phase += 1.0f;
 
             if (v->chord_step == inst->fm_modulator_idx) {
-                inst->last_modulator_sample = s;
+                /* FM position 0 (pre-morph): full modulator output is captured
+                 * regardless of how the morph scales this voice's level.
+                 * FM position 1 (post-morph): captured AFTER morph gain so
+                 * the morph's voicing affects modulation depth — when this
+                 * voice is morphed quiet, FM falls off too. */
+                if (inst->fm_position == 1) {
+                    inst->last_modulator_sample = s * inst->morph_gains[v->chord_step]
+                                                    * inst->mixer_trims[v->chord_step];
+                } else {
+                    inst->last_modulator_sample = s;
+                }
             }
 
             /* VCA drone: bypass envelope, hold open at 1.0. */
@@ -2422,8 +2690,17 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             float lfo_l_mod = 0.0f, lfo_r_mod = 0.0f;
             if (lfo_on) {
-                inst->filter_lfo_phase += inst->filter_lfo_phase_inc;
-                if (inst->filter_lfo_phase >= 1.0f) inst->filter_lfo_phase -= 1.0f;
+                if (!inst->filter_lfo_done) {
+                    inst->filter_lfo_phase += inst->filter_lfo_phase_inc;
+                    if (inst->filter_lfo_phase >= 1.0f) {
+                        if (inst->filter_lfo_mode == LFOMODE_ONE_SHOT) {
+                            inst->filter_lfo_phase = 1.0f;
+                            inst->filter_lfo_done = true;
+                        } else {
+                            inst->filter_lfo_phase -= 1.0f;
+                        }
+                    }
+                }
                 float l_phase = inst->filter_lfo_phase;
                 float r_phase = inst->filter_lfo_phase + inst->filter_lfo_spread * 0.5f;
                 if (r_phase >= 1.0f) r_phase -= 1.0f;
