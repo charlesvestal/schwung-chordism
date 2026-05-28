@@ -38,6 +38,7 @@ ${CROSS_PREFIX}g++ -g -O3 -shared -fPIC -std=c++14 \
 
 echo "Packaging..."
 cat src/module.json > dist/chordism/module.json
+[ -f src/help.json ] && cat src/help.json > dist/chordism/help.json
 [ -f LICENSE ] && cat LICENSE > dist/chordism/LICENSE
 cat build/dsp.so > dist/chordism/dsp.so
 chmod +x dist/chordism/dsp.so
