@@ -223,6 +223,7 @@ struct ADEnv {
 struct Voice {
     bool active;
     int root_note;       /* MIDI root that spawned this voice (for note-off match) */
+    int waveform;        /* per-voice waveform — set at voice_start */
     float phase;
     float phase_inc;
     float velocity;
@@ -237,8 +238,8 @@ struct chordism_instance_t {
     float attack;        /* 0..1 */
     float release;       /* 0..1 */
     float volume;        /* 0..1 */
-    int   waveform;      /* 0..NUM_WAVEFORMS-1 */
-    float shape;         /* 0..1 — per-waveform variable attribute */
+    int   waveforms[CHORD_SIZE];  /* per-osc waveform (chord step → wave) */
+    float shape;         /* 0..1 — shared shape across voices */
     float lfo_rate;      /* 0..1 — exp-mapped to Hz */
     float lfo_depth;     /* 0..1 — modulation amount on shape */
     int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
@@ -593,6 +594,7 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
                         int chord_step) {
     v->active = true;
     v->root_note = root_note;
+    v->waveform = inst->waveforms[chord_step];
     v->phase = 0.0f;
     float hz = midi_to_hz(root_note + interval_semis);
     if (detune_cents != 0.0f) {
@@ -676,7 +678,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->attack = 0.05f;
     inst->release = 0.30f;
     inst->volume = 0.80f;
-    inst->waveform = WAVE_SINE;
+    for (int i = 0; i < CHORD_SIZE; ++i) inst->waveforms[i] = WAVE_SINE;
     inst->shape = 0.0f;
     inst->lfo_rate = 0.0f;
     inst->lfo_depth = 0.0f;
@@ -775,11 +777,20 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "volume") == 0) {
         inst->volume = param_from_string(val, inst->volume);
     } else if (strcmp(key, "waveform") == 0) {
+        /* Compatibility: "waveform" sets ALL chord steps to the same value. */
         if (val) {
             int w = atoi(val);
             if (w < 0) w = 0;
             if (w >= NUM_WAVEFORMS) w = NUM_WAVEFORMS - 1;
-            inst->waveform = w;
+            for (int i = 0; i < CHORD_SIZE; ++i) inst->waveforms[i] = w;
+        }
+    } else if (strncmp(key, "wave_", 5) == 0 && key[5] >= '1' && key[5] <= '0' + CHORD_SIZE) {
+        int idx = key[5] - '1';
+        if (val) {
+            int w = atoi(val);
+            if (w < 0) w = 0;
+            if (w >= NUM_WAVEFORMS) w = NUM_WAVEFORMS - 1;
+            inst->waveforms[idx] = w;
         }
     } else if (strcmp(key, "shape") == 0) {
         inst->shape = param_from_string(val, inst->shape);
@@ -887,15 +898,23 @@ static const char *ui_hierarchy_json =
     "\"root\":{"
       "\"name\":\"Chordism\","
       "\"children\":null,"
-      "\"knobs\":[\"chord_type\",\"width\",\"filter_cutoff\",\"filter_resonance\",\"drive\",\"waveform\",\"shape\",\"volume\"],"
+      "\"knobs\":[\"chord_type\",\"width\",\"filter_cutoff\",\"filter_resonance\",\"drive\",\"shape\",\"reverb_mix\",\"volume\"],"
       "\"params\":["
         "\"chord_type\",\"width\",\"filter_cutoff\",\"filter_resonance\","
-        "\"drive\",\"waveform\",\"shape\",\"volume\","
+        "\"drive\",\"shape\",\"reverb_mix\",\"volume\","
+        "{\"level\":\"osc\",\"label\":\"Oscillators\"},"
         "{\"level\":\"filter\",\"label\":\"Filter\"},"
         "{\"level\":\"mod\",\"label\":\"Modulation\"},"
         "{\"level\":\"env\",\"label\":\"Envelope\"},"
         "{\"level\":\"fx\",\"label\":\"FX\"}"
       "]"
+    "},"
+    "\"osc\":{"
+      "\"name\":\"Oscillators\","
+      "\"children\":null,"
+      "\"knobs\":[\"wave_1\",\"wave_2\",\"wave_3\",\"wave_4\",\"shape\",\"detune\",\"chord_type\",\"width\"],"
+      "\"params\":[\"wave_1\",\"wave_2\",\"wave_3\",\"wave_4\",\"shape\",\"detune\",\"chord_type\",\"width\"],"
+      "\"navigate_to\":\"root\""
     "},"
     "\"filter\":{"
       "\"name\":\"Filter\","
@@ -942,7 +961,10 @@ static const char *chain_params_json =
   "{\"key\":\"filter_env_depth\",\"name\":\"Env Amt\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
   "{\"key\":\"drive\",\"name\":\"Drive\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"volume\",\"name\":\"Volume\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.02,\"default\":0.8},"
-  "{\"key\":\"waveform\",\"name\":\"Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
+  "{\"key\":\"wave_1\",\"name\":\"Wave 1\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
+  "{\"key\":\"wave_2\",\"name\":\"Wave 2\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
+  "{\"key\":\"wave_3\",\"name\":\"Wave 3\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
+  "{\"key\":\"wave_4\",\"name\":\"Wave 4\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
   "{\"key\":\"shape\",\"name\":\"Shape\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"lfo_shape\",\"name\":\"LFO Wave\",\"type\":\"enum\",\"options\":[\"Triangle\",\"Ramp Up\",\"Ramp Down\",\"Square\"],\"default\":0},"
   "{\"key\":\"lfo_rate\",\"name\":\"LFO Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
@@ -987,7 +1009,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "volume") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->volume);
     } else if (key && strcmp(key, "waveform") == 0) {
-        return snprintf(buf, buf_len, "%d", inst->waveform);
+        /* Report voice-0 waveform for backward compatibility. */
+        return snprintf(buf, buf_len, "%d", inst->waveforms[0]);
+    } else if (key && strncmp(key, "wave_", 5) == 0 && key[5] >= '1' && key[5] <= '0' + CHORD_SIZE && key[6] == '\0') {
+        int idx = key[5] - '1';
+        return snprintf(buf, buf_len, "%d", inst->waveforms[idx]);
     } else if (key && strcmp(key, "shape") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->shape);
     } else if (key && strcmp(key, "lfo_rate") == 0) {
@@ -1039,7 +1065,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "decimator") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->decimator);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.21");
+        return snprintf(buf, buf_len, "0.0.22");
     }
     buf[0] = '\0';
     return 0;
@@ -1138,7 +1164,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             if (!v->active) continue;
 
             float inc = v->phase_inc * vib_ratio;
-            float s = osc_sample(inst->waveform, v->phase, inc, effective_shape);
+            float s = osc_sample(v->waveform, v->phase, inc, effective_shape);
             v->phase += inc;
             if (v->phase >= 1.0f) v->phase -= 1.0f;
             else if (v->phase < 0.0f) v->phase += 1.0f;
