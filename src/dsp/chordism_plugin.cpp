@@ -353,29 +353,55 @@ struct Preset {
     int delay_mode;
     int vib_stray;
     int glide_legato;
+    /* v0.3.3 fields */
+    float lm_lfo_rate;
+    float lm_lfo_depth;
+    int   lm_lfo_shape;
+    float pm_lfo_rate;
+    float pm_lfo_depth;
+    int   pm_lfo_shape;
+    int   scale_index;
+    int   scale_root;
 };
 
 static const Preset PRESETS[] = {
 /*  name           chord  spread rot detune width  waveforms          shapes              morphI morphIn panI panIn fmM fmA  lfoR lfoD lfoS vibD vibS vibDly swpA swpR gld  cutoff reso mode slope fEnvA fEnvD fEnvAmt fLfoR fLfoD fLfoS fLfoSh drive  A     R     vol   rvMix rvDec rvDmp dlMix dlT  dlFb dlTn grnd bShf dec   arp tempo dir dlyMd vStray glLeg
 */
-{"Init",            6,    0.5f,  0.0f, 0.0f,  1.0f,  {1,1,1,1},        {0,0,0,0},          0,    0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,1.0f,  0.0f,0,   0,    0.0f, 0.3f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.05f,0.30f,0.8f, 0.0f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Lush Pad",        8,    0.5f,  0.0f, 0.30f, 1.0f,  {3,3,3,3},        {0.4f,0.4f,0.4f,0.4f}, 0.4f, 0.5f,   0.5f, 0.6f, 0,  0.0f,0.15f,0.4f,0,  0.3f,0.3f,0.3f,  0.0f,0.5f,0.4f,0.5f,  0.4f,0,   0,    0.1f, 0.6f, 0.3f,    0.05f,0.3f, 0.3f, 0,    0.05f, 0.25f,0.60f,0.7f, 0.55f,0.7f, 0.4f, 0.1f, 0.35f,0.3f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"FM Bell",         6,    0.5f,  0.0f, 0.05f, 0.8f,  {1,1,1,1},        {0,0,0,0},          0.2f, 0.3f,   0.0f, 0.0f, 0,  0.40f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.7f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.55f,0.7f, 0.35f,0.6f, 0.2f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Plucky Lead",     13,   0.5f,  0.0f, 0.0f,  0.6f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.0f,0,   0,    0.0f, 0.25f, 0.85f,  0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.2f, 0.5f, 0.4f, 0.15f,0.4f,0.45f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Filtered Sweep",  6,    0.5f,  0.0f, 0.0f,  0.8f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.4f, 0.4f, 0,  0.0f,0.45f,0.4f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.4f, 0,   0,    0.0f, 0.5f, 0.0f,    0.4f, 0.35f,0.3f, 0,    0.10f, 0.05f,0.40f,0.6f, 0.4f, 0.7f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Ambient Drone",   0,    0.5f,  0.0f, 0.10f, 0.5f,  {1,2,2,1},        {0.6f,0.6f,0.3f,0.3f}, 0.3f, 0.25f,  0.0f, 0.0f, 0,  0.0f,0.10f,0.3f,0, 0.2f,0.45f,0.6f,  0.0f,0.5f,0.0f,0.5f,  0.5f,0,   0,    0.0f, 0.5f, 0.0f,    0.10f,0.4f, 0.5f, 0,    0.0f,  0.5f, 0.80f,0.7f, 0.7f, 0.85f,0.3f, 0.3f, 0.6f,0.55f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Arp Bliss",       6,    0.5f,  0.0f, 0.0f,  0.9f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.3f, 0.4f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.5f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.4f, 0.6f, 0.4f, 0.3f, 0.4f,0.55f,0.6f,0.0f,0.0f,0.0f,  1,  0.75f, 0,  0,    0,    0},
-{"Lo-Fi Stab",      2,    0.5f,  0.0f, 0.0f,  0.7f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.0f, 0.0f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.0f,0,   0,    0.0f, 0.35f, 0.4f,   0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.25f,0.7f, 0.2f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.5f,0.3f,0.5f,  0,  0.4f,  0,  0,    0,    0},
-
+{"Init",            6,    0.5f,  0.0f, 0.0f,  1.0f,  {1,1,1,1},        {0,0,0,0},          0,    0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,1.0f,  0.0f,0,   0,    0.0f, 0.3f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.05f,0.30f,0.8f, 0.0f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Lush Pad",        8,    0.5f,  0.0f, 0.30f, 1.0f,  {3,3,3,3},        {0.4f,0.4f,0.4f,0.4f}, 0.4f, 0.5f,   0.5f, 0.6f, 0,  0.0f,0.15f,0.4f,0,  0.3f,0.3f,0.3f,  0.0f,0.5f,0.4f,0.5f,  0.4f,0,   0,    0.1f, 0.6f, 0.3f,    0.05f,0.3f, 0.3f, 0,    0.05f, 0.25f,0.60f,0.7f, 0.55f,0.7f, 0.4f, 0.1f, 0.35f,0.3f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"FM Bell",         6,    0.5f,  0.0f, 0.05f, 0.8f,  {1,1,1,1},        {0,0,0,0},          0.2f, 0.3f,   0.0f, 0.0f, 0,  0.40f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.7f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.55f,0.7f, 0.35f,0.6f, 0.2f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Plucky Lead",     13,   0.5f,  0.0f, 0.0f,  0.6f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.0f,0,   0,    0.0f, 0.25f, 0.85f,  0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.2f, 0.5f, 0.4f, 0.15f,0.4f,0.45f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Filtered Sweep",  6,    0.5f,  0.0f, 0.0f,  0.8f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.4f, 0.4f, 0,  0.0f,0.45f,0.4f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.4f, 0,   0,    0.0f, 0.5f, 0.0f,    0.4f, 0.35f,0.3f, 0,    0.10f, 0.05f,0.40f,0.6f, 0.4f, 0.7f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Ambient Drone",   0,    0.5f,  0.0f, 0.10f, 0.5f,  {1,2,2,1},        {0.6f,0.6f,0.3f,0.3f}, 0.3f, 0.25f,  0.0f, 0.0f, 0,  0.0f,0.10f,0.3f,0, 0.2f,0.45f,0.6f,  0.0f,0.5f,0.0f,0.5f,  0.5f,0,   0,    0.0f, 0.5f, 0.0f,    0.10f,0.4f, 0.5f, 0,    0.0f,  0.5f, 0.80f,0.7f, 0.7f, 0.85f,0.3f, 0.3f, 0.6f,0.55f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Arp Bliss",       6,    0.5f,  0.0f, 0.0f,  0.9f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.3f, 0.4f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.5f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.4f, 0.6f, 0.4f, 0.3f, 0.4f,0.55f,0.6f,0.0f,0.0f,0.0f,  1,  0.75f, 0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Lo-Fi Stab",      2,    0.5f,  0.0f, 0.0f,  0.7f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.0f, 0.0f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.0f,0,   0,    0.0f, 0.35f, 0.4f,   0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.25f,0.7f, 0.2f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.5f,0.3f,0.5f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
 /* === New in 0.2.2 === */
-{"Glacial",         8,    0.5f,  0.0f, 0.20f, 0.6f,  {3,3,3,3},        {0.3f,0.3f,0.3f,0.3f}, 0.3f, 0.4f,   0.2f, 0.3f, 0,  0.0f,0.15f,0.3f,0,  0.1f,0.3f,0.6f,  0.0f,0.5f,0.0f,0.45f, 0.2f, 0,   0,    0.5f, 0.7f, 0.10f,   0.12f,0.25f,0.7f, 0,    0.05f, 0.70f,0.85f,0.6f, 0.75f,0.9f, 0.4f, 0.2f, 0.55f,0.5f,0.55f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Acid Lead",       1,    0.4f,  0.0f, 0.0f,  0.4f,  {3,3,0,0},        {0.2f,0.2f,0,0},    0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.25f, 0.75f, 0,   1,    0.0f, 0.30f, 0.55f,  0.0f, 0.0f, 0.0f, 0,    0.35f, 0.0f, 0.20f,0.6f, 0.20f,0.5f, 0.3f, 0.20f,0.4f,0.55f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    1},
-{"Sub Bass",        0,    0.4f,  0.0f, 0.0f,  0.15f, {1,0,0,0},        {0,0,0,0},          0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.10f,0.65f, 0.0f, 0,   0,    0.0f, 0.30f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.85f,0.05f,0.4f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"EP",              7,    0.5f,  0.0f, 0.05f, 0.5f,  {1,1,1,1},        {0.4f,0.3f,0.3f,0.4f}, 0.2f, 0.3f,   0.0f, 0.0f, 0,  0.15f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.70f, 0.1f, 0,   0,    0.0f, 0.50f, -0.30f, 0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.45f,0.7f, 0.40f,0.6f, 0.4f, 0.1f, 0.4f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Synth Brass",     6,    0.5f,  0.0f, 0.10f, 0.7f,  {3,3,3,3},        {0.1f,0.1f,0.1f,0.1f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.15f, 0,   0,    0.05f,0.50f, 0.50f,   0.0f, 0.0f, 0.0f, 0,    0.15f, 0.05f,0.35f,0.7f, 0.35f,0.55f,0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Reese Bass",      0,    0.4f,  0.0f, 0.70f, 0.5f,  {3,3,3,3},        {0.15f,0.15f,0.15f,0.15f}, 0, 0,    0,   0,    0,  0.0f,0.1f,0.15f,0, 0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.3f, 0,   1,    0.0f, 0.50f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.20f, 0.0f, 0.40f,0.65f,0.2f, 0.5f, 0.4f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0},
-{"Underwater",      8,    0.6f,  0.0f, 0.15f, 0.7f,  {1,2,2,1},        {0.5f,0.5f,0.5f,0.5f}, 0.5f, 0.5f,   0.4f, 0.7f, 0,  0.0f,0.20f,0.4f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.10f,0.50f, 0.4f, 0,   0,    0.30f, 0.7f, 0.20f,  0.15f,0.4f, 0.9f, 0,    0.0f,  0.50f,0.70f,0.6f, 0.55f,0.7f, 0.4f, 0.35f,0.5f,0.6f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  2,    0,    0},
-{"Trance Arp",      6,    0.5f,  0.0f, 0.05f, 0.8f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.5f, 0,   1,    0.0f, 0.25f, 0.55f,   0.0f, 0.0f, 0.0f, 0,    0.20f, 0.0f, 0.15f,0.6f, 0.30f,0.5f, 0.4f, 0.35f,0.3f,0.55f,0.7f,0.0f,0.0f,0.0f,  1,  0.85f, 2,  1,    0,    0},
+{"Glacial",         8,    0.5f,  0.0f, 0.20f, 0.6f,  {3,3,3,3},        {0.3f,0.3f,0.3f,0.3f}, 0.3f, 0.4f,   0.2f, 0.3f, 0,  0.0f,0.15f,0.3f,0,  0.1f,0.3f,0.6f,  0.0f,0.5f,0.0f,0.45f, 0.2f, 0,   0,    0.5f, 0.7f, 0.10f,   0.12f,0.25f,0.7f, 0,    0.05f, 0.70f,0.85f,0.6f, 0.75f,0.9f, 0.4f, 0.2f, 0.55f,0.5f,0.55f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Acid Lead",       1,    0.4f,  0.0f, 0.0f,  0.4f,  {3,3,0,0},        {0.2f,0.2f,0,0},    0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.25f, 0.75f, 0,   1,    0.0f, 0.30f, 0.55f,  0.0f, 0.0f, 0.0f, 0,    0.35f, 0.0f, 0.20f,0.6f, 0.20f,0.5f, 0.3f, 0.20f,0.4f,0.55f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    1, 0,0,0, 0,0,0, 0,0},
+{"Sub Bass",        0,    0.4f,  0.0f, 0.0f,  0.15f, {1,0,0,0},        {0,0,0,0},          0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.10f,0.65f, 0.0f, 0,   0,    0.0f, 0.30f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.85f,0.05f,0.4f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"EP",              7,    0.5f,  0.0f, 0.05f, 0.5f,  {1,1,1,1},        {0.4f,0.3f,0.3f,0.4f}, 0.2f, 0.3f,   0.0f, 0.0f, 0,  0.15f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.70f, 0.1f, 0,   0,    0.0f, 0.50f, -0.30f, 0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.45f,0.7f, 0.40f,0.6f, 0.4f, 0.1f, 0.4f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Synth Brass",     6,    0.5f,  0.0f, 0.10f, 0.7f,  {3,3,3,3},        {0.1f,0.1f,0.1f,0.1f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.15f, 0,   0,    0.05f,0.50f, 0.50f,   0.0f, 0.0f, 0.0f, 0,    0.15f, 0.05f,0.35f,0.7f, 0.35f,0.55f,0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Reese Bass",      0,    0.4f,  0.0f, 0.70f, 0.5f,  {3,3,3,3},        {0.15f,0.15f,0.15f,0.15f}, 0, 0,    0,   0,    0,  0.0f,0.1f,0.15f,0, 0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.3f, 0,   1,    0.0f, 0.50f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.20f, 0.0f, 0.40f,0.65f,0.2f, 0.5f, 0.4f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Underwater",      8,    0.6f,  0.0f, 0.15f, 0.7f,  {1,2,2,1},        {0.5f,0.5f,0.5f,0.5f}, 0.5f, 0.5f,   0.4f, 0.7f, 0,  0.0f,0.20f,0.4f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.10f,0.50f, 0.4f, 0,   0,    0.30f, 0.7f, 0.20f,  0.15f,0.4f, 0.9f, 0,    0.0f,  0.50f,0.70f,0.6f, 0.55f,0.7f, 0.4f, 0.35f,0.5f,0.6f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  2,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Trance Arp",      6,    0.5f,  0.0f, 0.05f, 0.8f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.5f, 0,   1,    0.0f, 0.25f, 0.55f,   0.0f, 0.0f, 0.0f, 0,    0.20f, 0.0f, 0.15f,0.6f, 0.30f,0.5f, 0.4f, 0.35f,0.3f,0.55f,0.7f,0.0f,0.0f,0.0f,  1,  0.85f, 2,  1,    0,    0, 0,0,0, 0,0,0, 0,0},
+
+/* === New in v0.3.3 — showcasing v0.3.x features === */
+{"Phrygian Pad",    6,    0.5f,  0.0f, 0.10f, 0.8f,  {3,3,3,3},        {0.3f,0.3f,0.3f,0.3f}, 0.4f, 0.5f,   0.3f, 0.4f, 0,  0.0f,0.10f,0.3f,0,  0.0f,0.5f,0.4f,  0.0f,0.5f,0.0f,0.45f, 0.30f, 0,   0,    0.10f,0.6f, 0.20f,   0.10f,0.30f,0.6f, 0,    0.05f, 0.40f,0.65f,0.65f,0.55f,0.7f, 0.4f, 0.10f,0.4f,0.4f, 0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0.2f,0.30f,0, 0.15f,0.20f,0, 8,0},
+{"Pentatonic Pluck",2,    0.5f,  0.0f, 0.0f,  0.6f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.20f, 0,   0,    0.0f, 0.25f, 0.70f,   0.0f, 0.0f, 0.0f, 0,    0.10f, 0.0f, 0.30f,0.7f, 0.20f,0.5f, 0.4f, 0.15f,0.4f,0.5f, 0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 5,0},
+{"Wavetable Drone", 0,    0.5f,  0.0f, 0.05f, 0.7f,  {6,6,6,6},        {0.4f,0.5f,0.6f,0.7f}, 0.4f, 0.5f,   0.2f, 0.3f, 0,  0.0f,0.05f,0.2f,0,  0.05f,0.4f,0.5f, 0.0f,0.5f,0.0f,0.50f, 0.20f, 0,   0,    0.30f,0.6f, 0.15f,   0.10f,0.25f,0.6f, 0,    0.0f,  0.20f,0.0f, 0.55f,0.65f,0.85f,0.3f, 0.25f,0.5f,0.5f, 0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0.10f,0.3f,0, 0.10f,0.3f,0, 0,0},
+{"Pulse Stab",      6,    0.5f,  0.0f, 0.0f,  0.5f,  {5,5,5,5},        {0.3f,0.3f,0.3f,0.3f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.30f, 0.50f, 0,   1,    0.0f, 0.20f, 0.65f,   0.0f, 0.0f, 0.0f, 0,    0.25f, 0.0f, 0.10f,0.65f,0.15f,0.4f, 0.3f, 0.0f, 0.3f,0.4f, 0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Aftertouch Wow",  6,    0.5f,  0.0f, 0.10f, 0.7f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.20f,0.5f,0.2f, 0.0f,0.5f,0.0f,0.40f, 0.40f, 0,   1,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.10f, 0.05f,0.40f,0.65f,0.35f,0.6f, 0.4f, 0.10f,0.4f,0.5f, 0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Crystal Bell",    7,    0.5f,  0.0f, 0.05f, 0.8f,  {1,1,1,1},        {0.2f,0.0f,0.2f,0.2f}, 0.3f, 0.4f,   0.3f, 0.4f, 0,  0.55f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.85f, 0.0f,  0,   0,    0.0f, 0.7f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.80f,0.7f, 0.60f,0.85f,0.5f, 0.10f,0.4f,0.4f, 0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  1,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Tape Echo",       6,    0.5f,  0.0f, 0.05f, 0.7f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0.2f, 0.3f,   0.0f, 0.0f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.55f, 0.30f, 0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.15f, 0.05f,0.35f,0.65f,0.40f,0.6f, 0.4f, 0.40f,0.5f,0.6f, 0.4f,0.10f,0.05f,0.2f, 0,  0.4f,  0,  2,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Cosmic Sweep",    8,    0.6f,  0.0f, 0.15f, 0.9f,  {3,3,3,3},        {0.3f,0.3f,0.3f,0.3f}, 0.4f, 0.6f,   0.5f, 0.6f, 0,  0.0f,0.10f,0.3f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.40f, 0,   0,    0.40f,0.8f, 0.30f,   0.20f,0.5f, 0.85f,0,    0.05f, 0.30f,0.7f, 0.65f,0.60f,0.8f, 0.4f, 0.20f,0.5f,0.6f, 0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  2,    0,    0, 0.20f,0.4f,0, 0.15f,0.4f,0, 0,0},
+{"Dub Bass",        0,    0.4f,  0.0f, 0.0f,  0.3f,  {3,3,0,0},        {0.2f,0.2f,0,0},      0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.30f, 0.50f, 0,   1,    0.0f, 0.20f, 0.40f,   0.0f, 0.0f, 0.0f, 0,    0.30f, 0.0f, 0.40f,0.7f, 0.20f,0.55f,0.4f, 0.55f,0.55f,0.65f,0.4f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  3,    0,    1, 0,0,0, 0,0,0, 0,0},
+{"Random Bleeps",   6,    0.4f,  0.0f, 0.0f,  0.6f,  {1,5,4,5},        {0.4f,0.3f,0.5f,0.3f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.40f, 0,   1,    0.0f, 0.20f, 0.50f,   0.0f, 0.0f, 0.0f, 0,    0.15f, 0.0f, 0.20f,0.6f, 0.25f,0.55f,0.4f, 0.30f,0.4f,0.6f, 0.6f,0.0f,0.0f,0.0f,  1,  0.80f, 3,  1,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Lo-Fi Pad",       8,    0.5f,  0.0f, 0.05f, 0.6f,  {5,5,5,5},        {0.2f,0.2f,0.2f,0.2f}, 0.3f, 0.4f,   0.2f, 0.3f, 0,  0.0f,0.10f,0.3f,0,  0.0f,0.5f,0.4f,  0.0f,0.5f,0.0f,0.50f, 0.20f, 0,   0,    0.30f,0.7f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.40f,0.75f,0.55f,0.65f,0.85f,0.4f, 0.10f,0.5f,0.5f, 0.5f,0.40f,0.15f,0.35f,0, 0.4f,  0,  0,    0,    0, 0.10f,0.3f,0, 0.10f,0.3f,0, 0,0},
+{"Gypsy Lead",      13,   0.5f,  0.0f, 0.0f,  0.6f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.50f, 0.30f, 0,   1,    0.0f, 0.30f, 0.70f,   0.0f, 0.0f, 0.0f, 0,    0.15f, 0.0f, 0.40f,0.7f, 0.30f,0.6f, 0.4f, 0.20f,0.4f,0.5f, 0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 22,0},
+{"Coin Toss Lead",  6,    0.5f,  0.0f, 0.05f, 0.6f,  {3,3,3,3},        {0.3f,0.3f,0.3f,0.3f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.30f, 0,   1,    0.0f, 0.30f, 0.55f,   0.0f, 0.0f, 0.0f, 0,    0.20f, 0.0f, 0.25f,0.65f,0.20f,0.55f,0.4f, 0.25f,0.4f,0.5f, 0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  1,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Flamenco Stab",   13,   0.5f,  0.0f, 0.05f, 0.7f,  {3,3,3,3},        {0.15f,0.15f,0.15f,0.15f}, 0, 0,    0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.35f, 0.40f, 0,   1,    0.0f, 0.20f, 0.70f,   0.0f, 0.0f, 0.0f, 0,    0.30f, 0.0f, 0.25f,0.65f,0.30f,0.55f,0.3f, 0.0f, 0.3f,0.4f, 0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 23,0},
+{"Looping Pulse",   0,    0.4f,  0.0f, 0.0f,  0.4f,  {5,5,5,5},        {0.4f,0.4f,0.4f,0.4f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.30f, 0,   0,    0.05f,0.30f, 0.40f,   0.0f, 0.0f, 0.0f, 0,    0.10f, 0.05f,0.20f,0.7f, 0.30f,0.55f,0.4f, 0.20f,0.4f,0.5f, 0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
+{"Wavetable Brass", 6,    0.5f,  0.0f, 0.10f, 0.7f,  {6,6,6,6},        {0.5f,0.5f,0.5f,0.5f}, 0.2f, 0.3f,   0.0f, 0.0f, 0,  0.0f,0.05f,0.2f,0,  0.05f,0.4f,0.4f, 0.0f,0.5f,0.0f,0.45f, 0.20f, 0,   0,    0.05f,0.40f, 0.40f,   0.0f, 0.0f, 0.0f, 0,    0.15f, 0.05f,0.35f,0.7f, 0.35f,0.6f, 0.3f, 0.15f,0.4f,0.45f,0.6f,0.0f,0.0f,0.0f,  0,  0.4f,  0,  0,    0,    0, 0,0,0, 0,0,0, 0,0},
 };
 static const int NUM_PRESETS = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
@@ -706,12 +732,16 @@ struct chordism_instance_t {
 
     /* Arpeggiator */
     int   arp_enabled;                      /* 0/1 */
-    float arp_tempo;                        /* 0..1 → 30..240 BPM */
+    float arp_tempo;                        /* 0..1 → 30..240 BPM (used when clock_sync = 0) */
     int   arp_direction;                    /* 0=up, 1=down, 2=updown, 3=random */
     int   arp_step_idx;
     int   arp_step_dir;                     /* +1 or -1 (for updown) */
     int   arp_sample_counter;
     int   arp_step_period;                  /* samples per arp step */
+    int   arp_clock_sync;                   /* 0 = internal, 1 = MIDI clock */
+    int   arp_clock_division;               /* 0=1/4, 1=1/4T, 2=1/8, 3=1/8T, 4=1/16, 5=1/32 */
+    int   arp_clock_count;                  /* received clock ticks since last arp step */
+    bool  arp_clock_running;                /* set by MIDI Start (0xFA) / Continue (0xFB) */
 };
 
 /* ------------------------------------------------------------------------- */
@@ -975,6 +1005,16 @@ static void preset_apply(chordism_instance_t *inst, int idx) {
     inst->delay_mode = p->delay_mode;
     inst->vib_stray = p->vib_stray;
     inst->glide_legato = p->glide_legato;
+    inst->lm_lfo_rate = p->lm_lfo_rate;
+    inst->lm_lfo_depth = p->lm_lfo_depth;
+    inst->lm_lfo_shape = p->lm_lfo_shape;
+    inst->lm_lfo_phase_inc = lfo_rate_to_hz(inst->lm_lfo_rate) / SAMPLE_RATE;
+    inst->pm_lfo_rate = p->pm_lfo_rate;
+    inst->pm_lfo_depth = p->pm_lfo_depth;
+    inst->pm_lfo_shape = p->pm_lfo_shape;
+    inst->pm_lfo_phase_inc = lfo_rate_to_hz(inst->pm_lfo_rate) / SAMPLE_RATE;
+    inst->scale_index = p->scale_index;
+    inst->scale_root = p->scale_root;
 
     /* Recompute derived values. */
     morph_recompute(inst);
@@ -992,6 +1032,58 @@ static void preset_apply(chordism_instance_t *inst, int idx) {
     }
     aenv_recompute_rates(&inst->filter_env,
                          inst->filter_env_attack, inst->filter_env_decay);
+}
+
+/* Forward declaration of chord_on (defined later — needed because
+ * arp_step_and_fire calls it). */
+static void chord_on(chordism_instance_t *inst, int root_note, int velocity);
+
+/* Advance the arpeggiator one step + fire chord_on if the step is on the
+ * pattern. Shared between sample-counter and MIDI-clock-driven ticks. */
+static void arp_step_and_fire(chordism_instance_t *inst) {
+    if (inst->held_count <= 0) return;
+    int hc = inst->held_count;
+    switch (inst->arp_direction) {
+        case ARP_UP:
+            inst->arp_step_idx = (inst->arp_step_idx + 1) % hc;
+            break;
+        case ARP_DOWN:
+            inst->arp_step_idx--;
+            if (inst->arp_step_idx < 0) inst->arp_step_idx = hc - 1;
+            break;
+        case ARP_UPDOWN:
+            if (hc <= 1) {
+                inst->arp_step_idx = 0;
+            } else {
+                inst->arp_step_idx += inst->arp_step_dir;
+                if (inst->arp_step_idx >= hc) {
+                    inst->arp_step_idx = hc - 2;
+                    inst->arp_step_dir = -1;
+                } else if (inst->arp_step_idx < 0) {
+                    inst->arp_step_idx = 1;
+                    inst->arp_step_dir = 1;
+                }
+            }
+            break;
+        case ARP_RANDOM:
+            inst->arp_step_idx = rand() % hc;
+            break;
+    }
+    if (inst->arp_step_idx < 0) inst->arp_step_idx = 0;
+    if (inst->arp_step_idx >= hc) inst->arp_step_idx = hc - 1;
+
+    bool fire = inst->arp_pattern[inst->arp_pattern_pos];
+    inst->arp_pattern_pos = (inst->arp_pattern_pos + 1) % inst->arp_euclid_steps;
+    if (inst->arp_pattern_pos == 0 && inst->arp_variations > 1) {
+        inst->arp_variation_idx = (inst->arp_variation_idx + 1) % inst->arp_variations;
+    }
+    if (fire) {
+        int note = inst->held_notes[inst->arp_step_idx]
+                 + inst->arp_variation_idx * inst->arp_variation_interval;
+        if (note < 0) note = 0;
+        if (note > 127) note = 127;
+        chord_on(inst, note, 100);
+    }
 }
 
 static void arp_recompute(chordism_instance_t *inst) {
@@ -1533,6 +1625,10 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->arp_variations = 1;
     inst->arp_pattern_pos = 0;
     inst->arp_variation_idx = 0;
+    inst->arp_clock_sync = 0;
+    inst->arp_clock_division = 2;     /* 1/8 default */
+    inst->arp_clock_count = 0;
+    inst->arp_clock_running = false;
     inst->shape_lfo_mode = LFOMODE_FREE;
     inst->filter_lfo_mode = LFOMODE_FREE;
     inst->lm_lfo_mode = LFOMODE_FREE;
@@ -1624,10 +1720,45 @@ static void v2_destroy_instance(void *instance) {
 
 static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
     (void)source;
-    if (!instance || !msg || len < 3) return;
+    if (!instance || !msg) return;
     auto *inst = (chordism_instance_t*)instance;
 
-    uint8_t status = msg[0] & 0xF0;
+    uint8_t raw = msg[0];
+
+    /* System real-time messages (single byte, no channel). */
+    if (raw == 0xF8) {
+        /* MIDI clock tick (24 per quarter note). */
+        if (inst->arp_enabled && inst->arp_clock_sync && inst->arp_clock_running
+                && inst->held_count > 0) {
+            inst->arp_clock_count++;
+            /* Division → clock ticks per arp step. */
+            static const int clocks_per_step[6] = { 24, 16, 12, 8, 6, 3 };
+            int target = clocks_per_step[
+                inst->arp_clock_division < 6 ? inst->arp_clock_division : 5];
+            if (inst->arp_clock_count >= target) {
+                inst->arp_clock_count = 0;
+                arp_step_and_fire(inst);
+            }
+        }
+        return;
+    }
+    if (raw == 0xFA) {  /* Start */
+        inst->arp_clock_running = true;
+        inst->arp_clock_count = 0;
+        return;
+    }
+    if (raw == 0xFB) {  /* Continue */
+        inst->arp_clock_running = true;
+        return;
+    }
+    if (raw == 0xFC) {  /* Stop */
+        inst->arp_clock_running = false;
+        return;
+    }
+
+    if (len < 3) return;
+
+    uint8_t status = raw & 0xF0;
     uint8_t d1 = msg[1] & 0x7F;
     uint8_t d2 = msg[2] & 0x7F;
 
@@ -2032,6 +2163,15 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (v > 8) v = 8;
             inst->arp_variations = v;
         }
+    } else if (strcmp(key, "arp_clock_sync") == 0) {
+        if (val) inst->arp_clock_sync = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "arp_clock_division") == 0) {
+        if (val) {
+            int d = atoi(val);
+            if (d < 0) d = 0;
+            if (d > 5) d = 5;
+            inst->arp_clock_division = d;
+        }
     } else if (strcmp(key, "shape_lfo_mode") == 0) {
         if (val) {
             int m = atoi(val);
@@ -2180,8 +2320,8 @@ static const char *ui_hierarchy_json =
     "\"arp\":{"
       "\"name\":\"Arp\","
       "\"children\":null,"
-      "\"knobs\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\",\"arp_hold\",\"arp_euclid_steps\",\"arp_euclid_beats\",\"arp_variation_interval\",\"arp_variations\"],"
-      "\"params\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\",\"arp_hold\",\"arp_euclid_steps\",\"arp_euclid_beats\",\"arp_variation_interval\",\"arp_variations\"],"
+      "\"knobs\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\",\"arp_hold\",\"arp_euclid_steps\",\"arp_euclid_beats\",\"arp_clock_sync\",\"arp_clock_division\"],"
+      "\"params\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\",\"arp_hold\",\"arp_euclid_steps\",\"arp_euclid_beats\",\"arp_variation_interval\",\"arp_variations\",\"arp_clock_sync\",\"arp_clock_division\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"morph\":{"
@@ -2316,6 +2456,8 @@ static const char *chain_params_json =
   "{\"key\":\"arp_euclid_beats\",\"name\":\"Eucl Beat\",\"type\":\"int\",\"min\":0,\"max\":16,\"step\":1,\"default\":0},"
   "{\"key\":\"arp_variation_interval\",\"name\":\"Var Int\",\"type\":\"int\",\"min\":-12,\"max\":12,\"step\":1,\"default\":0},"
   "{\"key\":\"arp_variations\",\"name\":\"Var Num\",\"type\":\"int\",\"min\":1,\"max\":8,\"step\":1,\"default\":1},"
+  "{\"key\":\"arp_clock_sync\",\"name\":\"Clk Sync\",\"type\":\"enum\",\"options\":[\"Internal\",\"MIDI Clk\"],\"default\":0},"
+  "{\"key\":\"arp_clock_division\",\"name\":\"Clk Div\",\"type\":\"enum\",\"options\":[\"1/4\",\"1/4T\",\"1/8\",\"1/8T\",\"1/16\",\"1/32\"],\"default\":2},"
   "{\"key\":\"scale_index\",\"name\":\"Scale\",\"type\":\"enum\",\"options\":[\"Chromatic\",\"Major\",\"Minor\",\"Harm Min\",\"Pent Maj\",\"Pent Min\",\"Diminished\",\"Dorian\",\"Phrygian\",\"Lydian\",\"Mixolyd\",\"Locrian\",\"Blues Maj\",\"Blues Min\",\"Arabic\",\"Arabic2\",\"Hijaz\",\"Iwato\",\"Pelog\",\"Slendro\",\"Folk\",\"Japanese\",\"Gypsy\",\"Flamenco\",\"Whole Tone\"],\"default\":0},"
   "{\"key\":\"scale_root\",\"name\":\"Scale Rt\",\"type\":\"enum\",\"options\":[\"C\",\"C#\",\"D\",\"D#\",\"E\",\"F\",\"F#\",\"G\",\"G#\",\"A\",\"A#\",\"B\"],\"default\":0},"
   "{\"key\":\"ctrl_source\",\"name\":\"Ctrl Src\",\"type\":\"enum\",\"options\":[\"Aftertouch\",\"Random\",\"Coin Toss\",\"MIDI CC\",\"Velocity\"],\"default\":0},"
@@ -2535,6 +2677,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->arp_variation_interval);
     } else if (key && strcmp(key, "arp_variations") == 0) {
         return snprintf(buf, buf_len, "%d", inst->arp_variations);
+    } else if (key && strcmp(key, "arp_clock_sync") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_clock_sync);
+    } else if (key && strcmp(key, "arp_clock_division") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->arp_clock_division);
     } else if (key && strcmp(key, "shape_lfo_mode") == 0) {
         return snprintf(buf, buf_len, "%d", inst->shape_lfo_mode);
     } else if (key && strcmp(key, "filter_lfo_mode") == 0) {
@@ -2564,7 +2710,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "ctrl_to_fm") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_fm);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.3.2");
+        return snprintf(buf, buf_len, "0.3.3");
     }
     buf[0] = '\0';
     return 0;
@@ -2636,63 +2782,13 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     }
 
     for (int i = 0; i < frames; ++i) {
-        /* Arp tick: if enabled and any notes are held, count down samples
-         * to next step and advance pattern. */
-        if (inst->arp_enabled && inst->held_count > 0) {
+        /* Arp tick (internal clock). MIDI-clock-synced ticks are fired from
+         * on_midi when 0xF8 ticks arrive. */
+        if (inst->arp_enabled && !inst->arp_clock_sync && inst->held_count > 0) {
             inst->arp_sample_counter--;
             if (inst->arp_sample_counter <= 0) {
                 inst->arp_sample_counter = inst->arp_step_period;
-                /* Advance step_idx according to direction. */
-                int hc = inst->held_count;
-                switch (inst->arp_direction) {
-                    case ARP_UP:
-                        inst->arp_step_idx = (inst->arp_step_idx + 1) % hc;
-                        break;
-                    case ARP_DOWN:
-                        inst->arp_step_idx--;
-                        if (inst->arp_step_idx < 0) inst->arp_step_idx = hc - 1;
-                        break;
-                    case ARP_UPDOWN:
-                        if (hc <= 1) {
-                            inst->arp_step_idx = 0;
-                        } else {
-                            inst->arp_step_idx += inst->arp_step_dir;
-                            if (inst->arp_step_idx >= hc) {
-                                inst->arp_step_idx = hc - 2;
-                                inst->arp_step_dir = -1;
-                            } else if (inst->arp_step_idx < 0) {
-                                inst->arp_step_idx = 1;
-                                inst->arp_step_dir = 1;
-                            }
-                        }
-                        break;
-                    case ARP_RANDOM:
-                        inst->arp_step_idx = rand() % hc;
-                        break;
-                }
-                if (inst->arp_step_idx < 0) inst->arp_step_idx = 0;
-                if (inst->arp_step_idx >= hc) inst->arp_step_idx = hc - 1;
-
-                /* Euclidean: advance pattern position, only fire chord_on if
-                 * the corresponding step is "on". With beats=0 we treat the
-                 * pattern as all-on (no filtering). */
-                bool fire = inst->arp_pattern[inst->arp_pattern_pos];
-                inst->arp_pattern_pos = (inst->arp_pattern_pos + 1) % inst->arp_euclid_steps;
-
-                /* Variation: rotate through transpose intervals when the
-                 * arp completes a full cycle (we approximate by incrementing
-                 * variation_idx every time pattern_pos wraps to 0). */
-                if (inst->arp_pattern_pos == 0 && inst->arp_variations > 1) {
-                    inst->arp_variation_idx = (inst->arp_variation_idx + 1) % inst->arp_variations;
-                }
-
-                if (fire) {
-                    int note = inst->held_notes[inst->arp_step_idx]
-                             + inst->arp_variation_idx * inst->arp_variation_interval;
-                    if (note < 0) note = 0;
-                    if (note > 127) note = 127;
-                    chord_on(inst, note, 100);
-                }
+                arp_step_and_fire(inst);
             }
         }
 
