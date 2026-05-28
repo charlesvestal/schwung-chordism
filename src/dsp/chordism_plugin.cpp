@@ -167,6 +167,8 @@ struct Voice {
     float phase;
     float phase_inc;
     float velocity;
+    float pan_l;         /* equal-power L gain (cos(pan*π/2)) */
+    float pan_r;         /* equal-power R gain (sin(pan*π/2)) */
     AREnv env;
 };
 
@@ -184,6 +186,7 @@ struct chordism_instance_t {
     int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
     int   chord_type;    /* 0..NUM_CHORDS-1 — row in CHORD_TABLE */
     float detune;        /* 0..1 → 0..MAX_DETUNE_CENTS per chord step */
+    float width;         /* 0..1 — 0=mono, 1=full LR spread across chord */
     float filter_cutoff;     /* 0..1 → exp 20..20kHz */
     float filter_resonance;  /* 0..1 → Q from FILTER_Q_MIN to FILTER_Q_MAX */
     int   filter_mode;       /* 0..NUM_FILTER_MODES-1 */
@@ -192,9 +195,11 @@ struct chordism_instance_t {
     float filter_env_depth;  /* -1..+1 — bipolar modulation of cutoff */
     float drive;             /* 0..1 → 1..10x pre-tanh gain */
 
-    SVF   filter;
-    /* TPT SVF coefficients, precomputed at base cutoff (filter_recompute).
-     * If filter_env_depth != 0, render_block recomputes per-sample. */
+    SVF   filter_l;
+    SVF   filter_r;
+    /* Shared TPT SVF coefficients (same cutoff/Q across L and R), precomputed
+     * at base cutoff (filter_recompute). If filter_env_depth != 0,
+     * render_block recomputes per-sample. */
     float filter_a1;
     float filter_a2;
     float filter_a3;
@@ -435,7 +440,8 @@ static void release_all_voices(chordism_instance_t *inst) {
 
 static void voice_start(chordism_instance_t *inst, Voice *v,
                         int root_note, int interval_semis,
-                        float detune_cents, int velocity) {
+                        float detune_cents, int velocity,
+                        int chord_step) {
     v->active = true;
     v->root_note = root_note;
     v->phase = 0.0f;
@@ -445,6 +451,18 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
     }
     v->phase_inc = hz / SAMPLE_RATE;
     v->velocity = (float)velocity / 127.0f;
+
+    /* Pan: spread chord steps from L (step 0) to R (step CHORD_SIZE-1).
+     * width scales the spread; at width=0 all voices sit center. */
+    float norm = (CHORD_SIZE > 1)
+        ? ((float)chord_step / (float)(CHORD_SIZE - 1))   /* 0..1 across chord */
+        : 0.5f;
+    float pan = 0.5f + (norm - 0.5f) * inst->width;
+    if (pan < 0.0f) pan = 0.0f;
+    if (pan > 1.0f) pan = 1.0f;
+    float pan_angle = pan * 1.5707963267948966f;   /* π/2 */
+    v->pan_l = cosf(pan_angle);
+    v->pan_r = sinf(pan_angle);
 
     env_recompute_rates(&v->env, inst->attack, inst->release);
     /* Reset env value so each voice starts from 0 — voice steal already
@@ -469,7 +487,7 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
         Voice *target = &inst->voices[base + i];
         /* Detune linear: voice 0 = 0¢, voice 1 = +detune*MAX¢, ... */
         float cents = (float)i * inst->detune * MAX_DETUNE_CENTS;
-        voice_start(inst, target, root_note, intervals[i], cents, velocity);
+        voice_start(inst, target, root_note, intervals[i], cents, velocity, i);
     }
     inst->next_chord_base = (base + CHORD_SIZE) % NUM_VOICES;
 
@@ -515,6 +533,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->lfo_shape = LFO_TRIANGLE;
     inst->chord_type = CHORD_MAJOR;
     inst->detune = 0.0f;
+    inst->width = 1.0f;               /* full stereo spread by default */
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
     inst->filter_mode = FILT_LP;
@@ -526,8 +545,10 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     aenv_recompute_rates(&inst->filter_env,
                          inst->filter_env_attack, inst->filter_env_decay);
     inst->drive = 0.0f;               /* clean by default */
-    inst->filter.ic1eq = 0.0f;
-    inst->filter.ic2eq = 0.0f;
+    inst->filter_l.ic1eq = 0.0f;
+    inst->filter_l.ic2eq = 0.0f;
+    inst->filter_r.ic1eq = 0.0f;
+    inst->filter_r.ic2eq = 0.0f;
     filter_recompute(inst);
     inst->shape_lfo.phase = 0.0f;
     inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
@@ -613,6 +634,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
     } else if (strcmp(key, "detune") == 0) {
         inst->detune = param_from_string(val, inst->detune);
+    } else if (strcmp(key, "width") == 0) {
+        inst->width = param_from_string(val, inst->width);
     } else if (strcmp(key, "filter_cutoff") == 0) {
         inst->filter_cutoff = param_from_string(val, inst->filter_cutoff);
         filter_recompute(inst);
@@ -673,6 +696,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->chord_type);
     } else if (key && strcmp(key, "detune") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->detune);
+    } else if (key && strcmp(key, "width") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->width);
     } else if (key && strcmp(key, "filter_cutoff") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_cutoff);
     } else if (key && strcmp(key, "filter_resonance") == 0) {
@@ -688,7 +713,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "filter_env_depth") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.13");
+        return snprintf(buf, buf_len, "0.0.14");
     }
     buf[0] = '\0';
     return 0;
@@ -729,7 +754,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         if (effective_shape < 0.0f) effective_shape = 0.0f;
         if (effective_shape > 1.0f) effective_shape = 1.0f;
 
-        float mix = 0.0f;
+        float l_mix = 0.0f;
+        float r_mix = 0.0f;
 
         for (int vi = 0; vi < NUM_VOICES; ++vi) {
             Voice *v = &inst->voices[vi];
@@ -765,11 +791,13 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             v->phase += v->phase_inc;
             if (v->phase >= 1.0f) v->phase -= 1.0f;
 
-            mix += s * v->env.value * v->velocity * voice_gain;
+            float amp = s * v->env.value * v->velocity * voice_gain;
+            l_mix += amp * v->pan_l;
+            r_mix += amp * v->pan_r;
         }
 
         /* Filter coefficients: use precomputed static values, unless filter
-         * envelope is active — then recompute per sample. */
+         * envelope is active — then recompute per sample. Shared across L+R. */
         float a1 = inst->filter_a1;
         float a2 = inst->filter_a2;
         float a3 = inst->filter_a3;
@@ -790,30 +818,31 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             a3 = g * a2;
         }
 
-        /* Filter the post-mix signal. */
-        float filtered = svf_process(&inst->filter, mix, inst->filter_mode,
-                                     a1, a2, a3, inst->filter_k);
+        /* Dual SVF — same coefficients, independent state per channel. */
+        float fl = svf_process(&inst->filter_l, l_mix, inst->filter_mode,
+                               a1, a2, a3, inst->filter_k);
+        float fr = svf_process(&inst->filter_r, r_mix, inst->filter_mode,
+                               a1, a2, a3, inst->filter_k);
 
-        /* Resonance compensation: SVF peak gain ≈ Q at the cutoff frequency
-         * (Q ramps 0.5..20 here). Without compensation, modest resonance
-         * pushes the filter output into tanh's saturation region, audibly
-         * "clipping" the synth even at drive=0. Scale by 1/(1+reso*3) so
-         * the filter passband stays near ±1 across the resonance range. */
+        /* Resonance compensation — see notes earlier. */
         float reso_comp = 1.0f / (1.0f + inst->filter_resonance * 3.0f);
-        float compensated = filtered * reso_comp;
+        fl *= reso_comp;
+        fr *= reso_comp;
 
-        /* Drive — soft-clip via tanh. Gain ramps 1..10. At drive=0,
-         * tanh(x) ≈ x for small x, transparent for typical synth levels. */
+        /* Drive — soft-clip via tanh. */
         float drive_gain = 1.0f + inst->drive * 9.0f;
-        float driven = tanhf(drive_gain * compensated);
+        float dl = tanhf(drive_gain * fl);
+        float dr = tanhf(drive_gain * fr);
 
-        float scaled = driven * master_gain;
-        if (scaled > 32767.0f) scaled = 32767.0f;
-        if (scaled < -32768.0f) scaled = -32768.0f;
+        float sl = dl * master_gain;
+        float sr = dr * master_gain;
+        if (sl > 32767.0f) sl = 32767.0f;
+        if (sl < -32768.0f) sl = -32768.0f;
+        if (sr > 32767.0f) sr = 32767.0f;
+        if (sr < -32768.0f) sr = -32768.0f;
 
-        int16_t out = (int16_t)scaled;
-        out_interleaved_lr[2 * i + 0] = out;
-        out_interleaved_lr[2 * i + 1] = out;
+        out_interleaved_lr[2 * i + 0] = (int16_t)sl;
+        out_interleaved_lr[2 * i + 1] = (int16_t)sr;
     }
 }
 
