@@ -52,6 +52,63 @@ static const int   CHORD_SIZE = 4;
 static const int   NUM_VOICES = 16;  /* 4 banks of CHORD_SIZE — release tails finish before steal */
 static const int   HELD_STACK_MAX = 16;
 
+/* Scale quantizer LUTs — semitone offsets from scale root, ascending.
+ * Each row's last value is the row count (so we can pack variable-length
+ * scales in a fixed-width array). DVNA-spec list. */
+#define MAX_SCALE_NOTES 12
+static const int SCALE_TABLE[25][MAX_SCALE_NOTES + 1] = {
+    /* Chromatic */         { 0,1,2,3,4,5,6,7,8,9,10,11, 12 },
+    /* Major (Ionian) */    { 0,2,4,5,7,9,11,0,0,0,0,0, 7 },
+    /* Natural minor */     { 0,2,3,5,7,8,10,0,0,0,0,0, 7 },
+    /* Harmonic minor */    { 0,2,3,5,7,8,11,0,0,0,0,0, 7 },
+    /* Pentatonic major */  { 0,2,4,7,9,0,0,0,0,0,0,0, 5 },
+    /* Pentatonic minor */  { 0,3,5,7,10,0,0,0,0,0,0,0, 5 },
+    /* Diminished (W-H) */  { 0,2,3,5,6,8,9,11,0,0,0,0, 8 },
+    /* Dorian */            { 0,2,3,5,7,9,10,0,0,0,0,0, 7 },
+    /* Phrygian */          { 0,1,3,5,7,8,10,0,0,0,0,0, 7 },
+    /* Lydian */            { 0,2,4,6,7,9,11,0,0,0,0,0, 7 },
+    /* Mixolydian */        { 0,2,4,5,7,9,10,0,0,0,0,0, 7 },
+    /* Locrian */           { 0,1,3,5,6,8,10,0,0,0,0,0, 7 },
+    /* Blues major */       { 0,2,3,4,7,9,0,0,0,0,0,0, 6 },
+    /* Blues minor */       { 0,3,5,6,7,10,0,0,0,0,0,0, 6 },
+    /* Arabic */            { 0,2,4,5,6,8,10,0,0,0,0,0, 7 },
+    /* Arabic (h.mix) */    { 0,1,4,5,7,8,10,0,0,0,0,0, 7 },
+    /* Arabic (Hijaz) */    { 0,1,4,5,7,8,11,0,0,0,0,0, 7 },
+    /* Iwato (Japanese) */  { 0,1,5,6,10,0,0,0,0,0,0,0, 5 },
+    /* Pelog (Gamelan) */   { 0,1,3,7,8,0,0,0,0,0,0,0, 5 },
+    /* Slendro (Gamelan) */ { 0,2,5,7,10,0,0,0,0,0,0,0, 5 },
+    /* Folk */              { 0,2,3,7,8,10,0,0,0,0,0,0, 6 },
+    /* Japanese */          { 0,1,5,7,8,0,0,0,0,0,0,0, 5 },
+    /* Gypsy */             { 0,2,3,6,7,8,11,0,0,0,0,0, 7 },
+    /* Flamenco */          { 0,1,3,4,5,7,8,11,0,0,0,0, 8 },
+    /* Whole tone */        { 0,2,4,6,8,10,0,0,0,0,0,0, 6 },
+};
+static const int NUM_SCALES = 25;
+/* Quantize a MIDI note to the nearest scale degree on the same octave or
+ * above. Snaps UP to ensure chord intervals stay in voicing. */
+static int scale_quantize(int note, int scale_idx, int scale_root) {
+    if (scale_idx < 0) scale_idx = 0;
+    if (scale_idx >= NUM_SCALES) scale_idx = NUM_SCALES - 1;
+    const int *scale = SCALE_TABLE[scale_idx];
+    int count = scale[MAX_SCALE_NOTES];
+    if (count <= 0) return note;
+    int rel = note - scale_root;
+    int octave = (rel >= 0) ? (rel / 12) : ((rel - 11) / 12);
+    int pc = rel - octave * 12;          /* pitch class within octave 0..11 */
+    /* Find nearest scale degree (snap up if between). */
+    int best_pc = scale[0];
+    int best_dist = 99;
+    for (int i = 0; i < count; ++i) {
+        int d = pc - scale[i];
+        if (d < 0) d = -d;
+        if (d < best_dist) {
+            best_dist = d;
+            best_pc = scale[i];
+        }
+    }
+    return scale_root + octave * 12 + best_pc;
+}
+
 /* Chord LUT — DVNA-spec chord types. Each row is CHORD_SIZE semitone offsets
  * from the root note (in MIDI semitones, so 12 = octave). */
 enum ChordType {
@@ -358,6 +415,15 @@ static const int NUM_WAVEFORMS = 7;
 enum LfoMode { LFOMODE_FREE = 0, LFOMODE_NOTE_RESET = 1, LFOMODE_ONE_SHOT = 2 };
 static const int NUM_LFO_MODES = 3;
 
+enum ControlSource {
+    CTRL_AFTERTOUCH = 0,
+    CTRL_RANDOM = 1,
+    CTRL_COIN_TOSS = 2,
+    CTRL_CC = 3,
+    CTRL_VELOCITY = 4
+};
+static const int NUM_CONTROL_SOURCES = 5;
+
 enum LFOShape { LFO_TRIANGLE = 0, LFO_RAMP_UP = 1, LFO_RAMP_DOWN = 2, LFO_SQUARE = 3 };
 static const int NUM_LFO_SHAPES = 4;
 
@@ -451,6 +517,21 @@ struct chordism_instance_t {
     /* FM position: 0 = pre-level-morph (FM amount constant), 1 = post-level-morph
      * (FM amount scales with carrier level, varies with morph). */
     int   fm_position;
+
+    /* Scale quantizer. */
+    int   scale_index;       /* 0..NUM_SCALES-1; 0 = chromatic (no quantize) */
+    int   scale_root;        /* MIDI pitch class 0..11 — root of the scale */
+
+    /* Modulation source matrix. Single source globally, routed to multiple
+     * targets via per-target depth knobs (-1..+1). */
+    int   ctrl_source;       /* ControlSource enum */
+    int   ctrl_cc;           /* MIDI CC number for CTRL_CC (0..127) */
+    float ctrl_value;        /* current normalized source value (-1..+1 for bipolar, 0..1 for unipolar) */
+    float ctrl_to_cutoff;
+    float ctrl_to_morph;
+    float ctrl_to_vib;
+    float ctrl_to_shape;
+    float ctrl_to_fm;
 
     /* Arp: Hold, Euclidean, variation transpose. */
     int   arp_hold;
@@ -1240,6 +1321,13 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
         Voice *target = &inst->voices[base + i];
         int src = (i + rotation) % CHORD_SIZE;
         int scaled_interval = (int)((float)intervals[src] * spread_mult);
+        /* Scale quantizer: snap each chord note to the selected scale.
+         * scale_index=0 (Chromatic) leaves notes unchanged. */
+        if (inst->scale_index > 0) {
+            int target_note = root_note + scaled_interval;
+            int quantized = scale_quantize(target_note, inst->scale_index, inst->scale_root);
+            scaled_interval = quantized - root_note;
+        }
         /* Detune linear: voice 0 = 0¢, voice 1 = +detune*MAX¢, ... */
         float cents = (float)i * inst->detune * MAX_DETUNE_CENTS;
         voice_start(inst, target, root_note, scaled_interval, cents, velocity, i);
@@ -1454,6 +1542,16 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->lm_lfo_done = false;
     inst->pm_lfo_done = false;
     inst->fm_position = 0;
+    inst->scale_index = 0;          /* chromatic — no quantization */
+    inst->scale_root = 0;           /* C */
+    inst->ctrl_source = CTRL_AFTERTOUCH;
+    inst->ctrl_cc = 1;              /* MIDI CC 1 = modulation wheel */
+    inst->ctrl_value = 0.0f;
+    inst->ctrl_to_cutoff = 0.0f;
+    inst->ctrl_to_morph = 0.0f;
+    inst->ctrl_to_vib = 0.0f;
+    inst->ctrl_to_shape = 0.0f;
+    inst->ctrl_to_fm = 0.0f;
     arp_recompute(inst);
     arp_euclid_recompute(inst);
     inst->reverb_mix = 0.0f;          /* dry by default */
@@ -1538,6 +1636,21 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
          * Capture this BEFORE pushing the new note to the stack. */
         inst->prev_chord_still_held = (inst->held_count > 0);
         held_push(inst, d1);
+
+        /* Update modulation source value for note-triggered sources. */
+        switch (inst->ctrl_source) {
+            case CTRL_RANDOM:
+                inst->ctrl_value = ((float)(rand() & 0xFFFF) / 32768.0f) - 1.0f;
+                break;
+            case CTRL_COIN_TOSS:
+                inst->ctrl_value = (rand() & 1) ? 1.0f : -1.0f;
+                break;
+            case CTRL_VELOCITY:
+                inst->ctrl_value = (float)d2 / 127.0f;
+                break;
+            default:
+                break;
+        }
         if (inst->arp_enabled) {
             /* Fire this note immediately, then schedule next arp tick. */
             chord_on(inst, d1, d2);
@@ -1571,9 +1684,18 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     } else if (status == 0xD0) {
         /* Channel aftertouch — single-byte pressure in d1. */
         inst->aftertouch = (float)d1 / 127.0f;
-    } else if (status == 0xB0 && d1 == 123) {
-        inst->held_count = 0;
-        release_all_voices(inst);
+        if (inst->ctrl_source == CTRL_AFTERTOUCH) {
+            inst->ctrl_value = inst->aftertouch;
+        }
+    } else if (status == 0xB0) {
+        if (d1 == 123) {
+            /* All notes off */
+            inst->held_count = 0;
+            release_all_voices(inst);
+        } else if (inst->ctrl_source == CTRL_CC && d1 == inst->ctrl_cc) {
+            /* Selected MIDI CC → modulation source. */
+            inst->ctrl_value = (float)d2 / 127.0f;
+        }
     }
 }
 
@@ -1940,6 +2062,46 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
     } else if (strcmp(key, "fm_position") == 0) {
         if (val) inst->fm_position = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "scale_index") == 0) {
+        if (val) {
+            int s = atoi(val);
+            if (s < 0) s = 0;
+            if (s >= NUM_SCALES) s = NUM_SCALES - 1;
+            inst->scale_index = s;
+        }
+    } else if (strcmp(key, "scale_root") == 0) {
+        if (val) {
+            int r = atoi(val);
+            while (r < 0) r += 12;
+            while (r >= 12) r -= 12;
+            inst->scale_root = r;
+        }
+    } else if (strcmp(key, "ctrl_source") == 0) {
+        if (val) {
+            int s = atoi(val);
+            if (s < 0) s = 0;
+            if (s >= NUM_CONTROL_SOURCES) s = NUM_CONTROL_SOURCES - 1;
+            inst->ctrl_source = s;
+            /* Reset value when source switches. */
+            inst->ctrl_value = 0.0f;
+        }
+    } else if (strcmp(key, "ctrl_cc") == 0) {
+        if (val) {
+            int c = atoi(val);
+            if (c < 0) c = 0;
+            if (c > 127) c = 127;
+            inst->ctrl_cc = c;
+        }
+    } else if (strcmp(key, "ctrl_to_cutoff") == 0) {
+        inst->ctrl_to_cutoff = param_from_string(val, inst->ctrl_to_cutoff);
+    } else if (strcmp(key, "ctrl_to_morph") == 0) {
+        inst->ctrl_to_morph = param_from_string(val, inst->ctrl_to_morph);
+    } else if (strcmp(key, "ctrl_to_vib") == 0) {
+        inst->ctrl_to_vib = param_from_string(val, inst->ctrl_to_vib);
+    } else if (strcmp(key, "ctrl_to_shape") == 0) {
+        inst->ctrl_to_shape = param_from_string(val, inst->ctrl_to_shape);
+    } else if (strcmp(key, "ctrl_to_fm") == 0) {
+        inst->ctrl_to_fm = param_from_string(val, inst->ctrl_to_fm);
     }
 }
 
@@ -1967,7 +2129,9 @@ static const char *ui_hierarchy_json =
         "{\"level\":\"delay\",\"label\":\"Delay\"},"
         "{\"level\":\"arp\",\"label\":\"Arp\"},"
         "{\"level\":\"morph\",\"label\":\"Morph\"},"
-        "{\"level\":\"mixer\",\"label\":\"Mixer\"}"
+        "{\"level\":\"mixer\",\"label\":\"Mixer\"},"
+        "{\"level\":\"scale\",\"label\":\"Scale\"},"
+        "{\"level\":\"ctrl\",\"label\":\"Ctrl Src\"}"
       "]"
     "},"
     "\"osc\":{"
@@ -2031,7 +2195,21 @@ static const char *ui_hierarchy_json =
       "\"name\":\"Mixer\","
       "\"children\":null,"
       "\"knobs\":[\"mix_1\",\"mix_2\",\"mix_3\",\"mix_4\",\"fm_amount_1\",\"fm_amount_2\",\"fm_amount_3\",\"fm_amount_4\"],"
-      "\"params\":[\"mix_1\",\"mix_2\",\"mix_3\",\"mix_4\",\"fm_amount\",\"fm_amount_1\",\"fm_amount_2\",\"fm_amount_3\",\"fm_amount_4\",\"fm_modulator\",\"vib_osc_enable\",\"sweep_osc_enable\"],"
+      "\"params\":[\"mix_1\",\"mix_2\",\"mix_3\",\"mix_4\",\"fm_amount\",\"fm_amount_1\",\"fm_amount_2\",\"fm_amount_3\",\"fm_amount_4\",\"fm_modulator\",\"fm_position\",\"vib_osc_enable\",\"sweep_osc_enable\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"scale\":{"
+      "\"name\":\"Scale\","
+      "\"children\":null,"
+      "\"knobs\":[\"scale_index\",\"scale_root\"],"
+      "\"params\":[\"scale_index\",\"scale_root\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"ctrl\":{"
+      "\"name\":\"Ctrl Src\","
+      "\"children\":null,"
+      "\"knobs\":[\"ctrl_source\",\"ctrl_cc\",\"ctrl_to_cutoff\",\"ctrl_to_morph\",\"ctrl_to_vib\",\"ctrl_to_shape\",\"ctrl_to_fm\"],"
+      "\"params\":[\"ctrl_source\",\"ctrl_cc\",\"ctrl_to_cutoff\",\"ctrl_to_morph\",\"ctrl_to_vib\",\"ctrl_to_shape\",\"ctrl_to_fm\"],"
       "\"navigate_to\":\"root\""
     "}"
   "}"
@@ -2138,6 +2316,15 @@ static const char *chain_params_json =
   "{\"key\":\"arp_euclid_beats\",\"name\":\"Eucl Beat\",\"type\":\"int\",\"min\":0,\"max\":16,\"step\":1,\"default\":0},"
   "{\"key\":\"arp_variation_interval\",\"name\":\"Var Int\",\"type\":\"int\",\"min\":-12,\"max\":12,\"step\":1,\"default\":0},"
   "{\"key\":\"arp_variations\",\"name\":\"Var Num\",\"type\":\"int\",\"min\":1,\"max\":8,\"step\":1,\"default\":1},"
+  "{\"key\":\"scale_index\",\"name\":\"Scale\",\"type\":\"enum\",\"options\":[\"Chromatic\",\"Major\",\"Minor\",\"Harm Min\",\"Pent Maj\",\"Pent Min\",\"Diminished\",\"Dorian\",\"Phrygian\",\"Lydian\",\"Mixolyd\",\"Locrian\",\"Blues Maj\",\"Blues Min\",\"Arabic\",\"Arabic2\",\"Hijaz\",\"Iwato\",\"Pelog\",\"Slendro\",\"Folk\",\"Japanese\",\"Gypsy\",\"Flamenco\",\"Whole Tone\"],\"default\":0},"
+  "{\"key\":\"scale_root\",\"name\":\"Scale Rt\",\"type\":\"enum\",\"options\":[\"C\",\"C#\",\"D\",\"D#\",\"E\",\"F\",\"F#\",\"G\",\"G#\",\"A\",\"A#\",\"B\"],\"default\":0},"
+  "{\"key\":\"ctrl_source\",\"name\":\"Ctrl Src\",\"type\":\"enum\",\"options\":[\"Aftertouch\",\"Random\",\"Coin Toss\",\"MIDI CC\",\"Velocity\"],\"default\":0},"
+  "{\"key\":\"ctrl_cc\",\"name\":\"Ctrl CC\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1,\"default\":1},"
+  "{\"key\":\"ctrl_to_cutoff\",\"name\":\"→ Cutoff\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
+  "{\"key\":\"ctrl_to_morph\",\"name\":\"→ Morph\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
+  "{\"key\":\"ctrl_to_vib\",\"name\":\"→ Vib\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
+  "{\"key\":\"ctrl_to_shape\",\"name\":\"→ Shape\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
+  "{\"key\":\"ctrl_to_fm\",\"name\":\"→ FM\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
   "{\"key\":\"arp_enabled\",\"name\":\"Arp\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
   "{\"key\":\"arp_tempo\",\"name\":\"Arp Tempo\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.4},"
   "{\"key\":\"arp_direction\",\"name\":\"Arp Dir\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\",\"Up/Down\",\"Random\"],\"default\":0}"
@@ -2358,8 +2545,26 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->pm_lfo_mode);
     } else if (key && strcmp(key, "fm_position") == 0) {
         return snprintf(buf, buf_len, "%d", inst->fm_position);
+    } else if (key && strcmp(key, "scale_index") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->scale_index);
+    } else if (key && strcmp(key, "scale_root") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->scale_root);
+    } else if (key && strcmp(key, "ctrl_source") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->ctrl_source);
+    } else if (key && strcmp(key, "ctrl_cc") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->ctrl_cc);
+    } else if (key && strcmp(key, "ctrl_to_cutoff") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_cutoff);
+    } else if (key && strcmp(key, "ctrl_to_morph") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_morph);
+    } else if (key && strcmp(key, "ctrl_to_vib") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_vib);
+    } else if (key && strcmp(key, "ctrl_to_shape") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_shape);
+    } else if (key && strcmp(key, "ctrl_to_fm") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_fm);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.3.1");
+        return snprintf(buf, buf_len, "0.3.2");
     }
     buf[0] = '\0';
     return 0;
@@ -2394,6 +2599,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     /* Animated morphs: per-block, advance morph LFOs and recompute morph LUT
      * gains using effective index = base + LFO * depth. Block-rate update is
      * inaudible for slow LFOs and dramatically cheaper than per-sample. */
+    /* Effective morph index = base + LFO + control source routing. */
+    float morph_idx_base = inst->morph_index + inst->ctrl_value * inst->ctrl_to_morph * 0.5f;
+
     if (inst->lm_lfo_depth > 0.0f) {
         if (!inst->lm_lfo_done) {
             inst->lm_lfo_phase += inst->lm_lfo_phase_inc * (float)frames;
@@ -2407,7 +2615,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             }
         }
         float lm_val = lfo_sample(inst->lm_lfo_shape, inst->lm_lfo_phase) * inst->lm_lfo_depth;
-        morph_recompute_at(inst, inst->morph_index + lm_val * 0.5f);
+        morph_recompute_at(inst, morph_idx_base + lm_val * 0.5f);
+    } else if (inst->ctrl_to_morph != 0.0f) {
+        morph_recompute_at(inst, morph_idx_base);
     }
     if (inst->pm_lfo_depth > 0.0f) {
         if (!inst->pm_lfo_done) {
@@ -2507,9 +2717,13 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             inst->vib_ramp_value += inst->vib_ramp_inc;
             if (inst->vib_ramp_value > 1.0f) inst->vib_ramp_value = 1.0f;
         }
-        /* Aftertouch additively boosts vibrato depth (clamped to 0..1). */
-        float vib_depth_eff = inst->vib_depth + inst->aftertouch * 0.5f;
+        /* Vibrato depth modulation: still gets aftertouch boost (legacy);
+         * additionally routed via control-source matrix. */
+        float vib_depth_eff = inst->vib_depth
+                            + inst->aftertouch * 0.5f
+                            + inst->ctrl_value * inst->ctrl_to_vib * 0.5f;
         if (vib_depth_eff > 1.0f) vib_depth_eff = 1.0f;
+        if (vib_depth_eff < 0.0f) vib_depth_eff = 0.0f;
 
         float vib_mod_source;
         if (inst->vib_stray) {
@@ -2617,17 +2831,22 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             float inc = v->phase_inc * voice_vib_ratio;
 
-            /* Per-osc shape + global shape LFO offset, clamped. */
-            float eff_shape = inst->shapes[v->chord_step] + shape_lfo_offset;
+            /* Per-osc shape + shape LFO + ctrl-source routing, clamped. */
+            float eff_shape = inst->shapes[v->chord_step]
+                            + shape_lfo_offset
+                            + inst->ctrl_value * inst->ctrl_to_shape * 0.5f;
             if (eff_shape < 0.0f) eff_shape = 0.0f;
             if (eff_shape > 1.0f) eff_shape = 1.0f;
 
             /* FM: carriers' phase lookup offset by last modulator sample,
-             * per-carrier amount × global fm_amount. */
+             * per-carrier amount × global fm_amount × (ctrl modulation). */
+            float fm_amt_eff = inst->fm_amount + inst->ctrl_value * inst->ctrl_to_fm * 0.5f;
+            if (fm_amt_eff < 0.0f) fm_amt_eff = 0.0f;
+            if (fm_amt_eff > 1.0f) fm_amt_eff = 1.0f;
             float phase_used = v->phase;
-            if (v->chord_step != inst->fm_modulator_idx && inst->fm_amount > 0.0f) {
+            if (v->chord_step != inst->fm_modulator_idx && fm_amt_eff > 0.0f) {
                 float per_carrier = inst->fm_amounts[v->chord_step];
-                phase_used += inst->last_modulator_sample * inst->fm_amount * per_carrier;
+                phase_used += inst->last_modulator_sample * fm_amt_eff * per_carrier;
                 phase_used -= floorf(phase_used);
             }
 
@@ -2683,8 +2902,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         float ar1 = al1, ar2 = al2, ar3 = al3;
         bool env_on = inst->filter_env_depth != 0.0f;
         bool lfo_on = inst->filter_lfo_depth != 0.0f;
+        bool ctrl_on = inst->ctrl_to_cutoff != 0.0f;
 
-        if (env_on || lfo_on) {
+        if (env_on || lfo_on || ctrl_on) {
             float env_val = env_on ? aenv_tick(inst, &inst->filter_env) : 0.0f;
             float env_mod = env_val * inst->filter_env_depth;
 
@@ -2708,8 +2928,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 lfo_r_mod = lfo_sample(inst->filter_lfo_shape, r_phase) * inst->filter_lfo_depth;
             }
 
-            float eff_l = inst->filter_cutoff + env_mod + lfo_l_mod;
-            float eff_r = inst->filter_cutoff + env_mod + lfo_r_mod;
+            float ctrl_mod = inst->ctrl_value * inst->ctrl_to_cutoff * 0.5f;
+            float eff_l = inst->filter_cutoff + env_mod + lfo_l_mod + ctrl_mod;
+            float eff_r = inst->filter_cutoff + env_mod + lfo_r_mod + ctrl_mod;
             if (eff_l < 0.0f) eff_l = 0.0f; if (eff_l > 1.0f) eff_l = 1.0f;
             if (eff_r < 0.0f) eff_r = 0.0f; if (eff_r > 1.0f) eff_r = 1.0f;
 
