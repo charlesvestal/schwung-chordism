@@ -107,6 +107,14 @@ static const float ENV_SILENCE = 1e-4f;
  * sharp of voice 0 at full detune. */
 static const float MAX_DETUNE_CENTS = 50.0f;
 
+/* Vibrato range. Speed exp-mapped 0.1..12 Hz, depth 0..100 cents, delay
+ * linear 0..2 sec rise time (ramp from 0 to full depth after note-on). */
+static const float VIB_SPEED_MIN_HZ = 0.1f;
+static const float VIB_SPEED_MAX_HZ = 12.0f;
+static const float VIB_DEPTH_MAX_CENTS = 100.0f;
+static const float VIB_DELAY_MAX_S = 2.0f;
+static const float ONE_OVER_1200 = 1.0f / 1200.0f;
+
 /* Filter cutoff range, exp-mapped 0..1 → 20 Hz .. 20 kHz. TPT SVF is stable
  * up to Nyquist but tan() blows up exactly AT Nyquist — keep cutoff under
  * 0.49 * SR. */
@@ -186,6 +194,15 @@ struct chordism_instance_t {
     int   chord_type;    /* 0..NUM_CHORDS-1 — row in CHORD_TABLE */
     float detune;        /* 0..1 → 0..MAX_DETUNE_CENTS per chord step */
     float width;         /* 0..1 — 0=mono, 1=full LR spread across chord */
+    float vib_speed;     /* 0..1 → exp 0.1..12 Hz */
+    float vib_depth;     /* 0..1 → 0..VIB_DEPTH_MAX_CENTS */
+    float vib_delay;     /* 0..1 → 0..VIB_DELAY_MAX_S rise time */
+
+    /* Vibrato runtime state — single global LFO + ramp shared by all voices. */
+    float vibrato_phase;
+    float vibrato_phase_inc;
+    float vib_ramp_value;   /* 0..1, climbs after chord_on */
+    float vib_ramp_inc;     /* per-sample ramp step (precomputed from vib_delay) */
     float filter_cutoff;     /* 0..1 → exp 20..20kHz */
     float filter_resonance;  /* 0..1 → Q from FILTER_Q_MIN to FILTER_Q_MAX */
     int   filter_mode;       /* 0..NUM_FILTER_MODES-1 */
@@ -264,6 +281,21 @@ static float lfo_sample(int shape, float phase) {
 static float lfo_rate_to_hz(float rate01) {
     float ratio = LFO_RATE_MAX_HZ / LFO_RATE_MIN_HZ;
     return LFO_RATE_MIN_HZ * powf(ratio, rate01);
+}
+
+static float vib_speed_to_hz(float speed01) {
+    float ratio = VIB_SPEED_MAX_HZ / VIB_SPEED_MIN_HZ;
+    return VIB_SPEED_MIN_HZ * powf(ratio, speed01);
+}
+
+static void vibrato_recompute(chordism_instance_t *inst) {
+    inst->vibrato_phase_inc = vib_speed_to_hz(inst->vib_speed) / SAMPLE_RATE;
+
+    /* delay=0 → instant full ramp (single sample). */
+    float delay_s = inst->vib_delay * VIB_DELAY_MAX_S;
+    float delay_samples = delay_s * SAMPLE_RATE;
+    if (delay_samples < 1.0f) delay_samples = 1.0f;
+    inst->vib_ramp_inc = 1.0f / delay_samples;
 }
 
 /* Exp-map filter cutoff. */
@@ -490,6 +522,9 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
                          inst->filter_env_attack, inst->filter_env_decay);
     inst->filter_env.value = 0.0f;
     inst->filter_env.stage = ENV_ATTACK;
+
+    /* Re-trigger vibrato delay ramp (phase stays continuous). */
+    inst->vib_ramp_value = 0.0f;
 }
 
 static void chord_off(chordism_instance_t *inst, int root_note) {
@@ -528,6 +563,12 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->chord_type = CHORD_MAJOR;
     inst->detune = 0.0f;
     inst->width = 1.0f;               /* full stereo spread by default */
+    inst->vib_speed = 0.5f;           /* ~1 Hz */
+    inst->vib_depth = 0.0f;           /* disabled by default */
+    inst->vib_delay = 0.2f;
+    inst->vibrato_phase = 0.0f;
+    inst->vib_ramp_value = 0.0f;
+    vibrato_recompute(inst);
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
     inst->filter_mode = FILT_LP;
@@ -630,6 +671,14 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         inst->detune = param_from_string(val, inst->detune);
     } else if (strcmp(key, "width") == 0) {
         inst->width = param_from_string(val, inst->width);
+    } else if (strcmp(key, "vib_speed") == 0) {
+        inst->vib_speed = param_from_string(val, inst->vib_speed);
+        vibrato_recompute(inst);
+    } else if (strcmp(key, "vib_depth") == 0) {
+        inst->vib_depth = param_from_string(val, inst->vib_depth);
+    } else if (strcmp(key, "vib_delay") == 0) {
+        inst->vib_delay = param_from_string(val, inst->vib_delay);
+        vibrato_recompute(inst);
     } else if (strcmp(key, "filter_cutoff") == 0) {
         inst->filter_cutoff = param_from_string(val, inst->filter_cutoff);
         filter_recompute(inst);
@@ -692,6 +741,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->detune);
     } else if (key && strcmp(key, "width") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->width);
+    } else if (key && strcmp(key, "vib_speed") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->vib_speed);
+    } else if (key && strcmp(key, "vib_depth") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->vib_depth);
+    } else if (key && strcmp(key, "vib_delay") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->vib_delay);
     } else if (key && strcmp(key, "filter_cutoff") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_cutoff);
     } else if (key && strcmp(key, "filter_resonance") == 0) {
@@ -707,7 +762,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "filter_env_depth") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.15");
+        return snprintf(buf, buf_len, "0.0.16");
     }
     buf[0] = '\0';
     return 0;
@@ -748,6 +803,20 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         if (effective_shape < 0.0f) effective_shape = 0.0f;
         if (effective_shape > 1.0f) effective_shape = 1.0f;
 
+        /* Advance vibrato LFO + delay ramp, compute pitch-shift ratio. */
+        inst->vibrato_phase += inst->vibrato_phase_inc;
+        if (inst->vibrato_phase >= 1.0f) inst->vibrato_phase -= 1.0f;
+        if (inst->vib_ramp_value < 1.0f) {
+            inst->vib_ramp_value += inst->vib_ramp_inc;
+            if (inst->vib_ramp_value > 1.0f) inst->vib_ramp_value = 1.0f;
+        }
+        float vib_cents = sinf(TWO_PI * inst->vibrato_phase)
+                          * inst->vib_ramp_value
+                          * inst->vib_depth * VIB_DEPTH_MAX_CENTS;
+        float vib_ratio = (vib_cents == 0.0f)
+            ? 1.0f
+            : exp2f(vib_cents * ONE_OVER_1200);
+
         float l_mix = 0.0f;
         float r_mix = 0.0f;
 
@@ -781,9 +850,11 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             if (!v->active) continue;
 
-            float s = osc_sample(inst->waveform, v->phase, v->phase_inc, effective_shape);
-            v->phase += v->phase_inc;
+            float inc = v->phase_inc * vib_ratio;
+            float s = osc_sample(inst->waveform, v->phase, inc, effective_shape);
+            v->phase += inc;
             if (v->phase >= 1.0f) v->phase -= 1.0f;
+            else if (v->phase < 0.0f) v->phase += 1.0f;
 
             float amp = s * v->env.value * v->velocity * voice_gain;
 
