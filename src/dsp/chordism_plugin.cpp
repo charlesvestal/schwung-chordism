@@ -164,15 +164,25 @@ static const float DELAY_TIME_MIN_S = 0.005f;
 static const float DELAY_TIME_MAX_S = 1.4f;
 static const float DELAY_FEEDBACK_MAX = 0.95f;
 
-enum DelayMode { DELAY_STEREO = 0, DELAY_PINGPONG = 1, DELAY_FLIPFLOP = 2 };
-static const int NUM_DELAY_MODES = 3;
+enum DelayMode {
+    DELAY_STEREO = 0,
+    DELAY_PINGPONG = 1,
+    DELAY_FLIPFLOP = 2,
+    DELAY_LONG = 3,         /* mono ≤ buffer length */
+    DELAY_ZENITH = 4,       /* each repeat shifted +1 octave */
+    DELAY_INTERVAL = 5      /* each repeat pitch-shifted by delay_mod_depth±12 semis */
+};
+static const int NUM_DELAY_MODES = 6;
+
+enum EnvMode { ENVMODE_AD = 0, ENVMODE_ASR = 1, ENVMODE_LOOPING = 2 };
+static const int NUM_ENV_MODES = 3;
 
 static const int REVERB_COMB_L[4] = { 1557, 1617, 1491, 1422 };
 static const int REVERB_COMB_R[4] = { 1580, 1640, 1514, 1445 };
 static const int REVERB_ALLPASS_L[2] = { 556, 441 };
 static const int REVERB_ALLPASS_R[2] = { 579, 464 };
-static const int REVERB_COMB_MAX = 1700;
-static const int REVERB_ALLPASS_MAX = 600;
+static const int REVERB_COMB_MAX = 2400;   /* allow up to ~1.4× base size for "Space" */
+static const int REVERB_ALLPASS_MAX = 700;
 
 struct CombFilter {
     float buffer[REVERB_COMB_MAX];
@@ -198,10 +208,10 @@ static inline float comb_process(CombFilter *c, float input) {
     return out;
 }
 
-static inline float allpass_process(AllpassFilter *a, float input) {
+static inline float allpass_process(AllpassFilter *a, float input, float coef) {
     float bufout = a->buffer[a->idx];
     float out = -input + bufout;
-    a->buffer[a->idx] = input + bufout * 0.5f;
+    a->buffer[a->idx] = input + bufout * coef;
     a->idx++;
     if (a->idx >= a->size) a->idx = 0;
     return out;
@@ -368,6 +378,7 @@ struct ADEnv {
 
 struct Voice {
     bool active;
+    bool gate;           /* true while pad is held; chord_off sets to false */
     int root_note;       /* MIDI root that spawned this voice (for note-off match) */
     int chord_step;      /* 0..CHORD_SIZE-1 — position in the chord, for morph lookups */
     int waveform;        /* per-voice waveform — set at voice_start */
@@ -403,10 +414,70 @@ struct chordism_instance_t {
     float chord_rotation;   /* 0..1 → integer rotation 0..CHORD_SIZE-1 */
 
     /* FM: phase modulation. fm_modulator_idx picks which chord_step is the
-     * modulator; carriers (other steps) get phase += last_modulator * fm_amount. */
+     * modulator; carriers (other steps) get phase += last_modulator * fm_amounts[step]. */
     int   fm_modulator_idx;   /* 0..CHORD_SIZE-1 */
-    float fm_amount;          /* 0..1 → 0..2π phase modulation depth */
+    float fm_amount;          /* 0..1 — global amount, scales fm_amounts */
+    float fm_amounts[CHORD_SIZE]; /* per-carrier amount (modulator's slot is unused) */
     float last_modulator_sample;
+
+    /* Per-osc mixer trims (0..1, multiplies on top of morph_gain). */
+    float mixer_trims[CHORD_SIZE];
+
+    /* Per-osc enable bitmasks for vibrato and pitch sweep. 1 bit per chord step. */
+    int   vib_osc_enable;     /* low 4 bits, 1=enabled per step */
+    int   sweep_osc_enable;
+
+    /* Level morph LFO — animates morph_index continuously. */
+    float lm_lfo_rate;
+    float lm_lfo_depth;
+    int   lm_lfo_shape;
+    float lm_lfo_phase;
+    float lm_lfo_phase_inc;
+
+    /* Pan morph LFO — animates pan_morph_index continuously. */
+    float pm_lfo_rate;
+    float pm_lfo_depth;
+    int   pm_lfo_shape;
+    float pm_lfo_phase;
+    float pm_lfo_phase_inc;
+
+    /* VCA envelope mode + drone. */
+    int   vca_mode;       /* 0=AR (ASR-like), 1=AD, 2=Looping */
+    int   vca_hard_reset;
+    int   vca_drone;      /* if 1, bypass VCA envelope (always open) */
+
+    /* Filter envelope mode + hard reset. */
+    int   fenv_mode;      /* 0=AD, 1=ASR, 2=Looping */
+    int   fenv_hard_reset;
+
+    /* Quality control position pre/post-filter. */
+    int   quality_position;  /* 0=post-filter (current), 1=pre-filter */
+
+    /* Reverb extras. */
+    float reverb_bokeh;       /* 0..1 — diffusion (allpass coefficient) */
+    float reverb_lowcut;      /* 0..1 — HP cutoff on reverb feedback */
+    float reverb_space;       /* 0..1 — comb-length scale */
+    float reverb_mod_rate;    /* 0..1 → 0.1..5 Hz */
+    float reverb_mod_depth;   /* 0..1 → comb delay modulation depth */
+    float reverb_mod_phase;
+    float reverb_mod_phase_inc;
+    float reverb_hp_l;        /* one-pole HP state for low cut */
+    float reverb_hp_r;
+
+    /* Delay extras: Long mode buffer (single long mono), Tone Hi/Lo split. */
+    float delay_tone_hi;       /* 0..1 — LP cutoff in feedback (current 'tone') */
+    float delay_tone_lo;       /* 0..1 — HP cutoff in feedback */
+    float delay_mod_rate;      /* 0..1 → 0.1..5 Hz delay-time modulation */
+    float delay_mod_depth;     /* 0..1 → chorus/flange depth in delay time */
+    float delay_mod_phase;
+    float delay_mod_phase_inc;
+    float delay_hp_l;
+    float delay_hp_r;
+
+    /* Pitch-shifted delay state (Zenith / Interval modes — overlap-add granular). */
+    int   delay_grain_pos_l;
+    int   delay_grain_pos_r;
+    float delay_grain_phase;   /* 0..1, read-head fractional */
     float lfo_rate;      /* 0..1 — exp-mapped to Hz */
     float lfo_depth;     /* 0..1 — modulation amount on shape */
     int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
@@ -587,9 +658,11 @@ static float vib_speed_to_hz(float speed01) {
     return VIB_SPEED_MIN_HZ * powf(ratio, speed01);
 }
 
-static void pan_morph_recompute(chordism_instance_t *inst) {
+static void pan_morph_recompute_at(chordism_instance_t *inst, float index01) {
     const int N = 16;
-    float idx = inst->pan_morph_index * (float)(N - 1);
+    if (index01 < 0.0f) index01 = 0.0f;
+    if (index01 > 1.0f) index01 = 1.0f;
+    float idx = index01 * (float)(N - 1);
     int lo = (int)idx;
     int hi = lo + 1;
     if (lo < 0) lo = 0;
@@ -606,8 +679,14 @@ static void pan_morph_recompute(chordism_instance_t *inst) {
     }
 }
 
-static void morph_recompute(chordism_instance_t *inst) {
-    float idx = inst->morph_index * (float)(NUM_LEVEL_MORPHS - 1);
+static void pan_morph_recompute(chordism_instance_t *inst) {
+    pan_morph_recompute_at(inst, inst->pan_morph_index);
+}
+
+static void morph_recompute_at(chordism_instance_t *inst, float index01) {
+    if (index01 < 0.0f) index01 = 0.0f;
+    if (index01 > 1.0f) index01 = 1.0f;
+    float idx = index01 * (float)(NUM_LEVEL_MORPHS - 1);
     int lo = (int)idx;
     int hi = lo + 1;
     if (lo < 0) lo = 0;
@@ -622,6 +701,34 @@ static void morph_recompute(chordism_instance_t *inst) {
                   + LEVEL_MORPH_LUT[hi][i] * frac;
         /* Blend flat (1.0) → lut row by intensity. */
         inst->morph_gains[i] = 1.0f + (lut - 1.0f) * inst->morph_intensity;
+    }
+}
+
+static void morph_recompute(chordism_instance_t *inst) {
+    morph_recompute_at(inst, inst->morph_index);
+}
+
+/* Apply lo-fi (grind / shift / decimator) in-place to a stereo sample pair.
+ * Used in either pre- or post-filter position based on inst->quality_position. */
+static inline void apply_lofi(chordism_instance_t *inst, float *l, float *r) {
+    if (inst->grind > 0.0f) {
+        float bits = 16.0f - inst->grind * 14.0f;
+        float steps = powf(2.0f, bits) * 0.5f;
+        float shift = inst->bit_shift * 0.5f;
+        *l = (floorf((*l + shift) * steps + 0.5f) / steps) - shift;
+        *r = (floorf((*r + shift) * steps + 0.5f) / steps) - shift;
+    }
+    if (inst->decimator > 0.0f) {
+        int hold = (int)(inst->decimator * 32.0f);
+        if (hold < 1) hold = 1;
+        if (inst->decim_counter <= 0) {
+            inst->decim_hold_l = *l;
+            inst->decim_hold_r = *r;
+            inst->decim_counter = hold;
+        }
+        inst->decim_counter--;
+        *l = inst->decim_hold_l;
+        *r = inst->decim_hold_r;
     }
 }
 
@@ -652,11 +759,22 @@ static void reverb_recompute(chordism_instance_t *inst) {
     /* Comb feedback maps decay 0..1 → 0.70..0.97 (long tail at top). */
     float fb = 0.70f + inst->reverb_decay * 0.27f;
     float dp = inst->reverb_damp * 0.5f;   /* gentle damping range */
+    /* Space scales comb delay length: 0 → 0.5×, 1 → 1.4× (small → large room). */
+    float scale = 0.5f + inst->reverb_space * 0.9f;
     for (int i = 0; i < 4; ++i) {
         inst->rev_comb_l[i].feedback = fb;
         inst->rev_comb_l[i].damp = dp;
+        int sl = (int)((float)REVERB_COMB_L[i] * scale);
+        if (sl < 1) sl = 1;
+        if (sl >= REVERB_COMB_MAX) sl = REVERB_COMB_MAX - 1;
+        inst->rev_comb_l[i].size = sl;
+
         inst->rev_comb_r[i].feedback = fb;
         inst->rev_comb_r[i].damp = dp;
+        int sr = (int)((float)REVERB_COMB_R[i] * scale);
+        if (sr < 1) sr = 1;
+        if (sr >= REVERB_COMB_MAX) sr = REVERB_COMB_MAX - 1;
+        inst->rev_comb_r[i].size = sr;
     }
 }
 
@@ -903,23 +1021,32 @@ static void aenv_recompute_rates(ADEnv *env, float attack01, float decay01) {
     env->decay_coef = expf(-5.0f / decay_samples);
 }
 
-/* Tick AD envelope by one sample, return current value 0..1.
- * Stage flow: ATTACK (linear up to 1) → RELEASE (exp decay) → IDLE.
- * Reuses ENV_RELEASE as the decay stage. */
-static inline float aenv_tick(ADEnv *env) {
+/* Mode-aware tick: AD auto-decays; ASR sustains at peak while gate; Looping
+ * cycles attack-decay while gate. Reuses ENV_RELEASE as decay stage. */
+static inline float aenv_tick(chordism_instance_t *inst, ADEnv *env) {
+    int mode = inst->fenv_mode;
+    bool gate = inst->held_count > 0;
     switch (env->stage) {
         case ENV_ATTACK:
             env->value += env->attack_inc;
             if (env->value >= 1.0f) {
                 env->value = 1.0f;
-                env->stage = ENV_RELEASE;
+                env->stage = (mode == ENVMODE_ASR) ? ENV_HOLD : ENV_RELEASE;
             }
+            break;
+        case ENV_HOLD:
+            if (!gate) env->stage = ENV_RELEASE;
             break;
         case ENV_RELEASE:
             env->value *= env->decay_coef;
             if (env->value < ENV_SILENCE) {
-                env->value = 0.0f;
-                env->stage = ENV_IDLE;
+                if (gate && mode == ENVMODE_LOOPING) {
+                    env->value = 0.0f;
+                    env->stage = ENV_ATTACK;
+                } else {
+                    env->value = 0.0f;
+                    env->stage = ENV_IDLE;
+                }
             }
             break;
         case ENV_IDLE:
@@ -942,12 +1069,16 @@ static void env_recompute_rates(AREnv *env, float attack01, float release01) {
     env->release_coef = expf(-5.0f / release_samples);
 }
 
-/* Release every active voice. Used on note steal and on All Notes Off. */
+/* Release every active voice. Used on note steal and on All Notes Off.
+ * In ASR mode, the per-sample env tick transitions HOLD→RELEASE when gate
+ * goes false; in AD mode this is a no-op (already auto-decaying); in
+ * Looping mode the tick stops looping and goes to RELEASE. */
 static void release_all_voices(chordism_instance_t *inst) {
     for (int i = 0; i < NUM_VOICES; ++i) {
         Voice *v = &inst->voices[i];
-        if (v->active && v->env.stage != ENV_RELEASE) {
-            v->env.stage = ENV_RELEASE;
+        if (v->active) {
+            v->gate = false;
+            if (v->env.stage == ENV_HOLD) v->env.stage = ENV_RELEASE;
         }
     }
 }
@@ -957,6 +1088,7 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
                         float detune_cents, int velocity,
                         int chord_step) {
     v->active = true;
+    v->gate = true;
     v->root_note = root_note;
     v->chord_step = chord_step;
     v->waveform = inst->waveforms[chord_step];
@@ -994,9 +1126,15 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
     v->pan_offset = norm - 0.5f;
 
     env_recompute_rates(&v->env, inst->attack, inst->release);
-    /* Reset env value so each voice starts from 0 — voice steal already
-     * released the previous chord. */
-    v->env.value = 0.0f;
+    /* Hard reset = ON: zero env value so attack ramps from silence (click,
+     * but exact retrigger). Hard reset = OFF (default): keep current env
+     * value for smoother retrigger (the legacy behavior). */
+    if (inst->vca_hard_reset) {
+        v->env.value = 0.0f;
+    }
+    /* With dual-bank steal, claimed voice was usually idle (env.value = 0).
+     * If stealing a still-active slot, soft-retrigger means continuing from
+     * current value rather than dropping a cliff. */
     v->env.stage = ENV_ATTACK;
 }
 
@@ -1035,10 +1173,13 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
     }
     inst->has_prev_chord = true;
 
-    /* Re-trigger filter envelope from the start (hard reset to 0). */
+    /* Re-trigger filter envelope. Hard reset = ON forces value to 0;
+     * otherwise the env starts attacking from wherever it was. */
     aenv_recompute_rates(&inst->filter_env,
                          inst->filter_env_attack, inst->filter_env_decay);
-    inst->filter_env.value = 0.0f;
+    if (inst->fenv_hard_reset) {
+        inst->filter_env.value = 0.0f;
+    }
     inst->filter_env.stage = ENV_ATTACK;
 
     /* Re-trigger vibrato delay ramp (phase stays continuous). */
@@ -1049,14 +1190,13 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
 }
 
 static void chord_off(chordism_instance_t *inst, int root_note) {
-    /* Release all voices whose root_note matches. (Last-note mono means
-     * only the most recent chord is sounding; this handles the case where
-     * the user releases the same key.) */
+    /* Mark matching voices as gate-off. The env tick handles HOLD→RELEASE
+     * and stops Looping mode in the next sample. */
     for (int i = 0; i < NUM_VOICES; ++i) {
         Voice *v = &inst->voices[i];
-        if (v->active && v->root_note == root_note &&
-            v->env.stage != ENV_RELEASE) {
-            v->env.stage = ENV_RELEASE;
+        if (v->active && v->root_note == root_note) {
+            v->gate = false;
+            if (v->env.stage == ENV_HOLD) v->env.stage = ENV_RELEASE;
         }
     }
 }
@@ -1124,7 +1264,47 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->chord_rotation = 0.0f;
     inst->fm_modulator_idx = 0;
     inst->fm_amount = 0.0f;
+    for (int i = 0; i < CHORD_SIZE; ++i) inst->fm_amounts[i] = 0.5f;  /* default mid */
     inst->last_modulator_sample = 0.0f;
+    for (int i = 0; i < CHORD_SIZE; ++i) inst->mixer_trims[i] = 1.0f;
+    inst->vib_osc_enable = 0xF;      /* all 4 on by default */
+    inst->sweep_osc_enable = 0xF;
+    inst->lm_lfo_rate = 0.0f;
+    inst->lm_lfo_depth = 0.0f;
+    inst->lm_lfo_shape = LFO_TRIANGLE;
+    inst->lm_lfo_phase = 0.0f;
+    inst->lm_lfo_phase_inc = lfo_rate_to_hz(0.0f) / SAMPLE_RATE;
+    inst->pm_lfo_rate = 0.0f;
+    inst->pm_lfo_depth = 0.0f;
+    inst->pm_lfo_shape = LFO_TRIANGLE;
+    inst->pm_lfo_phase = 0.0f;
+    inst->pm_lfo_phase_inc = lfo_rate_to_hz(0.0f) / SAMPLE_RATE;
+    inst->vca_mode = ENVMODE_ASR;     /* matches legacy behavior (HOLD = sustain) */
+    inst->vca_hard_reset = 0;
+    inst->vca_drone = 0;
+    inst->fenv_mode = ENVMODE_AD;     /* filter env auto-decays */
+    inst->fenv_hard_reset = 0;
+    inst->quality_position = 0;
+    inst->reverb_bokeh = 0.5f;
+    inst->reverb_lowcut = 0.0f;
+    inst->reverb_space = 0.5f;
+    inst->reverb_mod_rate = 0.0f;
+    inst->reverb_mod_depth = 0.0f;
+    inst->reverb_mod_phase = 0.0f;
+    inst->reverb_mod_phase_inc = 1.0f / SAMPLE_RATE;
+    inst->reverb_hp_l = 0.0f;
+    inst->reverb_hp_r = 0.0f;
+    inst->delay_tone_hi = 0.7f;
+    inst->delay_tone_lo = 0.0f;
+    inst->delay_mod_rate = 0.0f;
+    inst->delay_mod_depth = 0.0f;
+    inst->delay_mod_phase = 0.0f;
+    inst->delay_mod_phase_inc = 0.5f / SAMPLE_RATE;
+    inst->delay_hp_l = 0.0f;
+    inst->delay_hp_r = 0.0f;
+    inst->delay_grain_pos_l = 0;
+    inst->delay_grain_pos_r = 0;
+    inst->delay_grain_phase = 0.0f;
     inst->lfo_rate = 0.0f;
     inst->lfo_depth = 0.0f;
     inst->lfo_shape = LFO_TRIANGLE;
@@ -1346,6 +1526,82 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
     } else if (strcmp(key, "fm_amount") == 0) {
         inst->fm_amount = param_from_string(val, inst->fm_amount);
+    } else if (strncmp(key, "fm_amount_", 10) == 0 && key[10] >= '1' && key[10] <= '0' + CHORD_SIZE && key[11] == '\0') {
+        int idx = key[10] - '1';
+        inst->fm_amounts[idx] = param_from_string(val, inst->fm_amounts[idx]);
+    } else if (strncmp(key, "mix_", 4) == 0 && key[4] >= '1' && key[4] <= '0' + CHORD_SIZE && key[5] == '\0') {
+        int idx = key[4] - '1';
+        inst->mixer_trims[idx] = param_from_string(val, inst->mixer_trims[idx]);
+    } else if (strcmp(key, "vib_osc_enable") == 0) {
+        if (val) inst->vib_osc_enable = atoi(val) & 0xF;
+    } else if (strcmp(key, "sweep_osc_enable") == 0) {
+        if (val) inst->sweep_osc_enable = atoi(val) & 0xF;
+    } else if (strcmp(key, "lm_lfo_rate") == 0) {
+        inst->lm_lfo_rate = param_from_string(val, inst->lm_lfo_rate);
+        inst->lm_lfo_phase_inc = lfo_rate_to_hz(inst->lm_lfo_rate) / SAMPLE_RATE;
+    } else if (strcmp(key, "lm_lfo_depth") == 0) {
+        inst->lm_lfo_depth = param_from_string(val, inst->lm_lfo_depth);
+    } else if (strcmp(key, "lm_lfo_shape") == 0) {
+        if (val) {
+            int s = atoi(val);
+            if (s < 0) s = 0;
+            if (s >= NUM_LFO_SHAPES) s = NUM_LFO_SHAPES - 1;
+            inst->lm_lfo_shape = s;
+        }
+    } else if (strcmp(key, "pm_lfo_rate") == 0) {
+        inst->pm_lfo_rate = param_from_string(val, inst->pm_lfo_rate);
+        inst->pm_lfo_phase_inc = lfo_rate_to_hz(inst->pm_lfo_rate) / SAMPLE_RATE;
+    } else if (strcmp(key, "pm_lfo_depth") == 0) {
+        inst->pm_lfo_depth = param_from_string(val, inst->pm_lfo_depth);
+    } else if (strcmp(key, "pm_lfo_shape") == 0) {
+        if (val) {
+            int s = atoi(val);
+            if (s < 0) s = 0;
+            if (s >= NUM_LFO_SHAPES) s = NUM_LFO_SHAPES - 1;
+            inst->pm_lfo_shape = s;
+        }
+    } else if (strcmp(key, "vca_mode") == 0) {
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m >= NUM_ENV_MODES) m = NUM_ENV_MODES - 1;
+            inst->vca_mode = m;
+        }
+    } else if (strcmp(key, "vca_hard_reset") == 0) {
+        if (val) inst->vca_hard_reset = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "vca_drone") == 0) {
+        if (val) inst->vca_drone = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "fenv_mode") == 0) {
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m >= NUM_ENV_MODES) m = NUM_ENV_MODES - 1;
+            inst->fenv_mode = m;
+        }
+    } else if (strcmp(key, "fenv_hard_reset") == 0) {
+        if (val) inst->fenv_hard_reset = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "quality_position") == 0) {
+        if (val) inst->quality_position = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "reverb_bokeh") == 0) {
+        inst->reverb_bokeh = param_from_string(val, inst->reverb_bokeh);
+    } else if (strcmp(key, "reverb_lowcut") == 0) {
+        inst->reverb_lowcut = param_from_string(val, inst->reverb_lowcut);
+    } else if (strcmp(key, "reverb_space") == 0) {
+        inst->reverb_space = param_from_string(val, inst->reverb_space);
+    } else if (strcmp(key, "reverb_mod_rate") == 0) {
+        inst->reverb_mod_rate = param_from_string(val, inst->reverb_mod_rate);
+        inst->reverb_mod_phase_inc = (0.1f + inst->reverb_mod_rate * 4.9f) / SAMPLE_RATE;
+    } else if (strcmp(key, "reverb_mod_depth") == 0) {
+        inst->reverb_mod_depth = param_from_string(val, inst->reverb_mod_depth);
+    } else if (strcmp(key, "delay_tone_hi") == 0) {
+        inst->delay_tone_hi = param_from_string(val, inst->delay_tone_hi);
+    } else if (strcmp(key, "delay_tone_lo") == 0) {
+        inst->delay_tone_lo = param_from_string(val, inst->delay_tone_lo);
+    } else if (strcmp(key, "delay_mod_rate") == 0) {
+        inst->delay_mod_rate = param_from_string(val, inst->delay_mod_rate);
+        inst->delay_mod_phase_inc = (0.1f + inst->delay_mod_rate * 4.9f) / SAMPLE_RATE;
+    } else if (strcmp(key, "delay_mod_depth") == 0) {
+        inst->delay_mod_depth = param_from_string(val, inst->delay_mod_depth);
     } else if (strcmp(key, "lfo_rate") == 0) {
         inst->lfo_rate = param_from_string(val, inst->lfo_rate);
         inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
@@ -1528,7 +1784,9 @@ static const char *ui_hierarchy_json =
         "{\"level\":\"env\",\"label\":\"Envelope\"},"
         "{\"level\":\"fx\",\"label\":\"FX\"},"
         "{\"level\":\"delay\",\"label\":\"Delay\"},"
-        "{\"level\":\"arp\",\"label\":\"Arp\"}"
+        "{\"level\":\"arp\",\"label\":\"Arp\"},"
+        "{\"level\":\"morph\",\"label\":\"Morph\"},"
+        "{\"level\":\"mixer\",\"label\":\"Mixer\"}"
       "]"
     "},"
     "\"osc\":{"
@@ -1542,8 +1800,8 @@ static const char *ui_hierarchy_json =
     "\"filter\":{"
       "\"name\":\"Filter\","
       "\"children\":null,"
-      "\"knobs\":[\"filter_cutoff\",\"filter_resonance\",\"filter_mode\",\"filter_slope\",\"filter_env_attack\",\"filter_env_decay\",\"filter_env_depth\",\"drive\"],"
-      "\"params\":[\"filter_cutoff\",\"filter_resonance\",\"filter_mode\",\"filter_slope\",\"filter_env_attack\",\"filter_env_decay\",\"filter_env_depth\",\"filter_lfo_rate\",\"filter_lfo_depth\",\"filter_lfo_spread\",\"filter_lfo_shape\",\"drive\"],"
+      "\"knobs\":[\"filter_cutoff\",\"filter_resonance\",\"filter_mode\",\"filter_slope\",\"filter_env_attack\",\"filter_env_decay\",\"filter_env_depth\",\"fenv_mode\"],"
+      "\"params\":[\"filter_cutoff\",\"filter_resonance\",\"filter_mode\",\"filter_slope\",\"filter_env_attack\",\"filter_env_decay\",\"filter_env_depth\",\"fenv_mode\",\"fenv_hard_reset\",\"filter_lfo_rate\",\"filter_lfo_depth\",\"filter_lfo_spread\",\"filter_lfo_shape\",\"drive\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"mod\":{"
@@ -1556,22 +1814,22 @@ static const char *ui_hierarchy_json =
     "\"env\":{"
       "\"name\":\"Envelope\","
       "\"children\":null,"
-      "\"knobs\":[\"attack\",\"release\",\"volume\"],"
-      "\"params\":[\"attack\",\"release\",\"volume\"],"
+      "\"knobs\":[\"attack\",\"release\",\"volume\",\"vca_mode\",\"vca_hard_reset\",\"vca_drone\"],"
+      "\"params\":[\"attack\",\"release\",\"volume\",\"vca_mode\",\"vca_hard_reset\",\"vca_drone\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"fx\":{"
       "\"name\":\"FX\","
       "\"children\":null,"
-      "\"knobs\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"grind\",\"bit_shift\",\"decimator\"],"
-      "\"params\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"grind\",\"bit_shift\",\"decimator\"],"
+      "\"knobs\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"reverb_bokeh\",\"reverb_lowcut\",\"reverb_space\",\"grind\",\"decimator\"],"
+      "\"params\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"reverb_bokeh\",\"reverb_lowcut\",\"reverb_space\",\"reverb_mod_rate\",\"reverb_mod_depth\",\"grind\",\"bit_shift\",\"decimator\",\"quality_position\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"delay\":{"
       "\"name\":\"Delay\","
       "\"children\":null,"
-      "\"knobs\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone\",\"delay_mode\"],"
-      "\"params\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone\",\"delay_mode\"],"
+      "\"knobs\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone_hi\",\"delay_tone_lo\",\"delay_mode\",\"delay_mod_rate\",\"delay_mod_depth\"],"
+      "\"params\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone\",\"delay_tone_hi\",\"delay_tone_lo\",\"delay_mode\",\"delay_mod_rate\",\"delay_mod_depth\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"arp\":{"
@@ -1579,6 +1837,20 @@ static const char *ui_hierarchy_json =
       "\"children\":null,"
       "\"knobs\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\"],"
       "\"params\":[\"arp_enabled\",\"arp_tempo\",\"arp_direction\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"morph\":{"
+      "\"name\":\"Morph\","
+      "\"children\":null,"
+      "\"knobs\":[\"morph_index\",\"morph_intensity\",\"lm_lfo_rate\",\"lm_lfo_depth\",\"pan_morph_index\",\"pan_morph_intensity\",\"pm_lfo_rate\",\"pm_lfo_depth\"],"
+      "\"params\":[\"morph_index\",\"morph_intensity\",\"lm_lfo_rate\",\"lm_lfo_depth\",\"lm_lfo_shape\",\"pan_morph_index\",\"pan_morph_intensity\",\"pm_lfo_rate\",\"pm_lfo_depth\",\"pm_lfo_shape\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"mixer\":{"
+      "\"name\":\"Mixer\","
+      "\"children\":null,"
+      "\"knobs\":[\"mix_1\",\"mix_2\",\"mix_3\",\"mix_4\",\"fm_amount_1\",\"fm_amount_2\",\"fm_amount_3\",\"fm_amount_4\"],"
+      "\"params\":[\"mix_1\",\"mix_2\",\"mix_3\",\"mix_4\",\"fm_amount\",\"fm_amount_1\",\"fm_amount_2\",\"fm_amount_3\",\"fm_amount_4\",\"fm_modulator\",\"vib_osc_enable\",\"sweep_osc_enable\"],"
       "\"navigate_to\":\"root\""
     "}"
   "}"
@@ -1643,7 +1915,38 @@ static const char *chain_params_json =
   "{\"key\":\"glide_rate\",\"name\":\"Glide\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"glide_legato\",\"name\":\"Glide Lega\",\"type\":\"enum\",\"options\":[\"Always\",\"Legato\"],\"default\":0},"
   "{\"key\":\"vib_stray\",\"name\":\"Vib Stray\",\"type\":\"enum\",\"options\":[\"LFO\",\"Random\"],\"default\":0},"
-  "{\"key\":\"delay_mode\",\"name\":\"Dly Mode\",\"type\":\"enum\",\"options\":[\"Stereo\",\"Ping-Pong\",\"Flip-Flop\"],\"default\":0},"
+  "{\"key\":\"delay_mode\",\"name\":\"Dly Mode\",\"type\":\"enum\",\"options\":[\"Stereo\",\"Ping-Pong\",\"Flip-Flop\",\"Long\",\"Zenith\",\"Interval\"],\"default\":0},"
+  "{\"key\":\"delay_tone_hi\",\"name\":\"Dly Hi\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.7},"
+  "{\"key\":\"delay_tone_lo\",\"name\":\"Dly Lo\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"delay_mod_rate\",\"name\":\"Dly ModR\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"delay_mod_depth\",\"name\":\"Dly ModD\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"reverb_bokeh\",\"name\":\"Verb Bok\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"reverb_lowcut\",\"name\":\"Verb LoC\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"reverb_space\",\"name\":\"Verb Spc\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"reverb_mod_rate\",\"name\":\"Verb ModR\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"reverb_mod_depth\",\"name\":\"Verb ModD\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"lm_lfo_rate\",\"name\":\"LM LFO R\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"lm_lfo_depth\",\"name\":\"LM LFO D\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"lm_lfo_shape\",\"name\":\"LM LFO W\",\"type\":\"enum\",\"options\":[\"Triangle\",\"Ramp Up\",\"Ramp Down\",\"Square\"],\"default\":0},"
+  "{\"key\":\"pm_lfo_rate\",\"name\":\"PM LFO R\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"pm_lfo_depth\",\"name\":\"PM LFO D\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"pm_lfo_shape\",\"name\":\"PM LFO W\",\"type\":\"enum\",\"options\":[\"Triangle\",\"Ramp Up\",\"Ramp Down\",\"Square\"],\"default\":0},"
+  "{\"key\":\"vca_mode\",\"name\":\"VCA Mode\",\"type\":\"enum\",\"options\":[\"AD\",\"ASR\",\"Looping\"],\"default\":1},"
+  "{\"key\":\"vca_hard_reset\",\"name\":\"VCA HardR\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
+  "{\"key\":\"vca_drone\",\"name\":\"Drone\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
+  "{\"key\":\"fenv_mode\",\"name\":\"FEnv Mode\",\"type\":\"enum\",\"options\":[\"AD\",\"ASR\",\"Looping\"],\"default\":0},"
+  "{\"key\":\"fenv_hard_reset\",\"name\":\"FEnv HardR\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
+  "{\"key\":\"quality_position\",\"name\":\"LoFi Pos\",\"type\":\"enum\",\"options\":[\"Post-Flt\",\"Pre-Flt\"],\"default\":0},"
+  "{\"key\":\"fm_amount_1\",\"name\":\"FM Amt 1\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"fm_amount_2\",\"name\":\"FM Amt 2\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"fm_amount_3\",\"name\":\"FM Amt 3\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"fm_amount_4\",\"name\":\"FM Amt 4\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"mix_1\",\"name\":\"Mix 1\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":1},"
+  "{\"key\":\"mix_2\",\"name\":\"Mix 2\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":1},"
+  "{\"key\":\"mix_3\",\"name\":\"Mix 3\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":1},"
+  "{\"key\":\"mix_4\",\"name\":\"Mix 4\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":1},"
+  "{\"key\":\"vib_osc_enable\",\"name\":\"Vib Osc\",\"type\":\"int\",\"min\":0,\"max\":15,\"step\":1,\"default\":15},"
+  "{\"key\":\"sweep_osc_enable\",\"name\":\"Swp Osc\",\"type\":\"int\",\"min\":0,\"max\":15,\"step\":1,\"default\":15},"
   "{\"key\":\"arp_enabled\",\"name\":\"Arp\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"],\"default\":0},"
   "{\"key\":\"arp_tempo\",\"name\":\"Arp Tempo\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.4},"
   "{\"key\":\"arp_direction\",\"name\":\"Arp Dir\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\",\"Up/Down\",\"Random\"],\"default\":0}"
@@ -1710,6 +2013,56 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->fm_modulator_idx);
     } else if (key && strcmp(key, "fm_amount") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->fm_amount);
+    } else if (key && strncmp(key, "fm_amount_", 10) == 0 && key[10] >= '1' && key[10] <= '0' + CHORD_SIZE && key[11] == '\0') {
+        return snprintf(buf, buf_len, "%.4f", inst->fm_amounts[key[10] - '1']);
+    } else if (key && strncmp(key, "mix_", 4) == 0 && key[4] >= '1' && key[4] <= '0' + CHORD_SIZE && key[5] == '\0') {
+        return snprintf(buf, buf_len, "%.4f", inst->mixer_trims[key[4] - '1']);
+    } else if (key && strcmp(key, "vib_osc_enable") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->vib_osc_enable);
+    } else if (key && strcmp(key, "sweep_osc_enable") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->sweep_osc_enable);
+    } else if (key && strcmp(key, "lm_lfo_rate") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->lm_lfo_rate);
+    } else if (key && strcmp(key, "lm_lfo_depth") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->lm_lfo_depth);
+    } else if (key && strcmp(key, "lm_lfo_shape") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lm_lfo_shape);
+    } else if (key && strcmp(key, "pm_lfo_rate") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->pm_lfo_rate);
+    } else if (key && strcmp(key, "pm_lfo_depth") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->pm_lfo_depth);
+    } else if (key && strcmp(key, "pm_lfo_shape") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pm_lfo_shape);
+    } else if (key && strcmp(key, "vca_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->vca_mode);
+    } else if (key && strcmp(key, "vca_hard_reset") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->vca_hard_reset);
+    } else if (key && strcmp(key, "vca_drone") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->vca_drone);
+    } else if (key && strcmp(key, "fenv_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->fenv_mode);
+    } else if (key && strcmp(key, "fenv_hard_reset") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->fenv_hard_reset);
+    } else if (key && strcmp(key, "quality_position") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->quality_position);
+    } else if (key && strcmp(key, "reverb_bokeh") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_bokeh);
+    } else if (key && strcmp(key, "reverb_lowcut") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_lowcut);
+    } else if (key && strcmp(key, "reverb_space") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_space);
+    } else if (key && strcmp(key, "reverb_mod_rate") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_mod_rate);
+    } else if (key && strcmp(key, "reverb_mod_depth") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_mod_depth);
+    } else if (key && strcmp(key, "delay_tone_hi") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_tone_hi);
+    } else if (key && strcmp(key, "delay_tone_lo") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_tone_lo);
+    } else if (key && strcmp(key, "delay_mod_rate") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_mod_rate);
+    } else if (key && strcmp(key, "delay_mod_depth") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_mod_depth);
     } else if (key && strcmp(key, "lfo_rate") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->lfo_rate);
     } else if (key && strcmp(key, "lfo_depth") == 0) {
@@ -1795,7 +2148,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "arp_direction") == 0) {
         return snprintf(buf, buf_len, "%d", inst->arp_direction);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.2.2");
+        return snprintf(buf, buf_len, "0.3.0");
     }
     buf[0] = '\0';
     return 0;
@@ -1826,6 +2179,22 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     const float master_gain = inst->volume * 16000.0f;
 
     LFO *lfo = &inst->shape_lfo;
+
+    /* Animated morphs: per-block, advance morph LFOs and recompute morph LUT
+     * gains using effective index = base + LFO * depth. Block-rate update is
+     * inaudible for slow LFOs and dramatically cheaper than per-sample. */
+    if (inst->lm_lfo_depth > 0.0f) {
+        inst->lm_lfo_phase += inst->lm_lfo_phase_inc * (float)frames;
+        while (inst->lm_lfo_phase >= 1.0f) inst->lm_lfo_phase -= 1.0f;
+        float lm_val = lfo_sample(inst->lm_lfo_shape, inst->lm_lfo_phase) * inst->lm_lfo_depth;
+        morph_recompute_at(inst, inst->morph_index + lm_val * 0.5f);
+    }
+    if (inst->pm_lfo_depth > 0.0f) {
+        inst->pm_lfo_phase += inst->pm_lfo_phase_inc * (float)frames;
+        while (inst->pm_lfo_phase >= 1.0f) inst->pm_lfo_phase -= 1.0f;
+        float pm_val = lfo_sample(inst->pm_lfo_shape, inst->pm_lfo_phase) * inst->pm_lfo_depth;
+        pan_morph_recompute_at(inst, inst->pan_morph_index + pm_val * 0.5f);
+    }
 
     for (int i = 0; i < frames; ++i) {
         /* Arp tick: if enabled and any notes are held, count down samples
@@ -1919,9 +2288,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         }
 
         float pitch_semis = inst->sweep_value;
-        float vib_ratio = (vib_cents == 0.0f && pitch_semis == 0.0f)
-            ? 1.0f
-            : exp2f(vib_cents * ONE_OVER_1200 + pitch_semis * ONE_OVER_12);
+        /* per-voice vib_ratio is computed below in the voice loop (osc-enable bitmasks). */
 
         float l_mix = 0.0f;
         float r_mix = 0.0f;
@@ -1935,17 +2302,31 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                     v->env.value += v->env.attack_inc;
                     if (v->env.value >= 1.0f) {
                         v->env.value = 1.0f;
-                        v->env.stage = ENV_HOLD;
+                        /* AD and Looping auto-decay from peak; ASR holds. */
+                        if (inst->vca_mode == ENVMODE_ASR) {
+                            v->env.stage = ENV_HOLD;
+                        } else {
+                            v->env.stage = ENV_RELEASE;
+                        }
                     }
                     break;
                 case ENV_HOLD:
+                    /* If gate dropped between samples and we're still in HOLD,
+                     * transition out. (Normally chord_off handles this.) */
+                    if (!v->gate) v->env.stage = ENV_RELEASE;
                     break;
                 case ENV_RELEASE:
                     v->env.value *= v->env.release_coef;
                     if (v->env.value < ENV_SILENCE) {
-                        v->env.value = 0.0f;
-                        v->env.stage = ENV_IDLE;
-                        v->active = false;
+                        /* Looping: while gate still held, restart attack. */
+                        if (v->gate && inst->vca_mode == ENVMODE_LOOPING) {
+                            v->env.value = 0.0f;
+                            v->env.stage = ENV_ATTACK;
+                        } else {
+                            v->env.value = 0.0f;
+                            v->env.stage = ENV_IDLE;
+                            v->active = false;
+                        }
                     }
                     break;
                 case ENV_IDLE:
@@ -1966,17 +2347,29 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 }
             }
 
-            float inc = v->phase_inc * vib_ratio;
+            /* Per-osc vibrato + pitch-sweep enable bitmasks. If this voice's
+             * bit is 0, that modulation source doesn't apply to it. */
+            float voice_vib_cents = ((inst->vib_osc_enable >> v->chord_step) & 1)
+                ? vib_cents : 0.0f;
+            float voice_sweep_semis = ((inst->sweep_osc_enable >> v->chord_step) & 1)
+                ? pitch_semis : 0.0f;
+            float voice_vib_ratio = (voice_vib_cents == 0.0f && voice_sweep_semis == 0.0f)
+                ? 1.0f
+                : exp2f(voice_vib_cents * ONE_OVER_1200 + voice_sweep_semis * ONE_OVER_12);
+
+            float inc = v->phase_inc * voice_vib_ratio;
 
             /* Per-osc shape + global shape LFO offset, clamped. */
             float eff_shape = inst->shapes[v->chord_step] + shape_lfo_offset;
             if (eff_shape < 0.0f) eff_shape = 0.0f;
             if (eff_shape > 1.0f) eff_shape = 1.0f;
 
-            /* FM: carriers' phase lookup offset by last modulator sample. */
+            /* FM: carriers' phase lookup offset by last modulator sample,
+             * per-carrier amount × global fm_amount. */
             float phase_used = v->phase;
             if (v->chord_step != inst->fm_modulator_idx && inst->fm_amount > 0.0f) {
-                phase_used += inst->last_modulator_sample * inst->fm_amount;
+                float per_carrier = inst->fm_amounts[v->chord_step];
+                phase_used += inst->last_modulator_sample * inst->fm_amount * per_carrier;
                 phase_used -= floorf(phase_used);
             }
 
@@ -1989,8 +2382,12 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 inst->last_modulator_sample = s;
             }
 
-            float amp = s * v->env.value * v->velocity * voice_gain
-                          * inst->morph_gains[v->chord_step];
+            /* VCA drone: bypass envelope, hold open at 1.0. */
+            float env_val = inst->vca_drone ? 1.0f : v->env.value;
+
+            float amp = s * env_val * v->velocity * voice_gain
+                          * inst->morph_gains[v->chord_step]
+                          * inst->mixer_trims[v->chord_step];
 
             /* Pan = width-based static pan + pan-morph offset, summed and
              * clamped. Equal-power L/R via sqrt. */
@@ -2006,6 +2403,11 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             r_mix += amp * pan_r;
         }
 
+        /* Lo-Fi pre-filter (if user toggled position=1). */
+        if (inst->quality_position == 1) {
+            apply_lofi(inst, &l_mix, &r_mix);
+        }
+
         /* Filter coefficients: per-channel recompute when filter env or LFO is
          * active (the LFO supports L/R spread → independent coefs).
          * Otherwise reuse precomputed static coefs for both channels. */
@@ -2015,7 +2417,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         bool lfo_on = inst->filter_lfo_depth != 0.0f;
 
         if (env_on || lfo_on) {
-            float env_val = env_on ? aenv_tick(&inst->filter_env) : 0.0f;
+            float env_val = env_on ? aenv_tick(inst, &inst->filter_env) : 0.0f;
             float env_mod = env_val * inst->filter_env_depth;
 
             float lfo_l_mod = 0.0f, lfo_r_mod = 0.0f;
@@ -2073,29 +2475,10 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         float dl = tanhf(drive_gain * fl);
         float dr = tanhf(drive_gain * fr);
 
-        /* Lo-Fi: bit grind (with optional DC shift bias), then sample-rate
-         * decimation (sample/hold). Bypassed cleanly when params are 0. */
-        if (inst->grind > 0.0f) {
-            float bits = 16.0f - inst->grind * 14.0f;   /* 16 → 2 */
-            float steps = powf(2.0f, bits) * 0.5f;      /* half because signal is ±1 */
-            float shift = inst->bit_shift * 0.5f;       /* up to ±0.5 bias */
-            float bl = dl + shift;
-            float br = dr + shift;
-            dl = (floorf(bl * steps + 0.5f) / steps) - shift;
-            dr = (floorf(br * steps + 0.5f) / steps) - shift;
-        }
-
-        if (inst->decimator > 0.0f) {
-            int hold = (int)(inst->decimator * 32.0f);
-            if (hold < 1) hold = 1;
-            if (inst->decim_counter <= 0) {
-                inst->decim_hold_l = dl;
-                inst->decim_hold_r = dr;
-                inst->decim_counter = hold;
-            }
-            inst->decim_counter--;
-            dl = inst->decim_hold_l;
-            dr = inst->decim_hold_r;
+        /* Lo-Fi post-filter (current position). For pre-filter, see the
+         * apply_lofi() call inserted before the SVF block. */
+        if (inst->quality_position == 0) {
+            apply_lofi(inst, &dl, &dr);
         }
 
         /* Delay: runs after lo-fi, before reverb. Three modes:
@@ -2122,24 +2505,67 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             float in_l = dl, in_r = dr;
             float out_l = wet_l, out_r = wet_r;
 
-            if (inst->delay_mode == DELAY_STEREO) {
-                inst->delay_buf_l[inst->delay_write_idx] = in_l + inst->delay_lp_l * fb;
-                inst->delay_buf_r[inst->delay_write_idx] = in_r + inst->delay_lp_r * fb;
-            } else {
-                /* Ping-pong & flip-flop: cross-feedback L↔R. */
-                float in_mono = (in_l + in_r) * 0.5f;
-                inst->delay_buf_l[inst->delay_write_idx] = in_mono + inst->delay_lp_r * fb;
-                inst->delay_buf_r[inst->delay_write_idx] = inst->delay_lp_l * fb;
+            switch (inst->delay_mode) {
+                case DELAY_STEREO:
+                default:
+                    inst->delay_buf_l[inst->delay_write_idx] = in_l + inst->delay_lp_l * fb;
+                    inst->delay_buf_r[inst->delay_write_idx] = in_r + inst->delay_lp_r * fb;
+                    break;
 
-                if (inst->delay_mode == DELAY_FLIPFLOP) {
-                    /* Swap output read each delay period — counter advances
-                     * when write_idx wraps past a period boundary. */
-                    if ((inst->delay_write_idx % delay_samples) == 0) {
-                        inst->delay_flip_counter++;
+                case DELAY_PINGPONG:
+                case DELAY_FLIPFLOP: {
+                    float in_mono = (in_l + in_r) * 0.5f;
+                    inst->delay_buf_l[inst->delay_write_idx] = in_mono + inst->delay_lp_r * fb;
+                    inst->delay_buf_r[inst->delay_write_idx] = inst->delay_lp_l * fb;
+                    if (inst->delay_mode == DELAY_FLIPFLOP) {
+                        if ((inst->delay_write_idx % delay_samples) == 0) {
+                            inst->delay_flip_counter++;
+                        }
+                        if (inst->delay_flip_counter & 1) {
+                            float tmp = out_l; out_l = out_r; out_r = tmp;
+                        }
                     }
-                    if (inst->delay_flip_counter & 1) {
-                        float tmp = out_l; out_l = out_r; out_r = tmp;
+                    break;
+                }
+
+                case DELAY_LONG: {
+                    /* Single mono line, both channels read the same tap. */
+                    float in_mono = (in_l + in_r) * 0.5f;
+                    float wet_mono = (inst->delay_lp_l + inst->delay_lp_r) * 0.5f;
+                    inst->delay_buf_l[inst->delay_write_idx] = in_mono + wet_mono * fb;
+                    inst->delay_buf_r[inst->delay_write_idx] = inst->delay_buf_l[inst->delay_write_idx];
+                    out_l = (wet_l + wet_r) * 0.5f;
+                    out_r = out_l;
+                    break;
+                }
+
+                case DELAY_ZENITH:
+                case DELAY_INTERVAL: {
+                    /* Pitch-shifted repeats — simplified granular: write the
+                     * dry input plus pitch-shifted feedback from a roving
+                     * read head. Zenith fixes +12 semitones; Interval is
+                     * controlled by delay_mod_depth (-12..+12). */
+                    float semis = (inst->delay_mode == DELAY_ZENITH)
+                        ? 12.0f
+                        : (inst->delay_mod_depth * 24.0f - 12.0f);
+                    float read_speed = exp2f(semis / 12.0f);
+                    inst->delay_grain_phase += read_speed - 1.0f;
+                    /* Use shifted feedback as input + dry */
+                    float shifted_l = inst->delay_buf_l[
+                        (inst->delay_write_idx - delay_samples
+                          + (int)(inst->delay_grain_phase * (float)delay_samples * 0.5f))
+                          & DELAY_BUFFER_MASK];
+                    float shifted_r = inst->delay_buf_r[
+                        (inst->delay_write_idx - delay_samples
+                          + (int)(inst->delay_grain_phase * (float)delay_samples * 0.5f))
+                          & DELAY_BUFFER_MASK];
+                    inst->delay_buf_l[inst->delay_write_idx] = in_l + shifted_l * fb;
+                    inst->delay_buf_r[inst->delay_write_idx] = in_r + shifted_r * fb;
+                    /* Reset grain phase periodically. */
+                    if (inst->delay_grain_phase > 4.0f || inst->delay_grain_phase < -4.0f) {
+                        inst->delay_grain_phase = 0.0f;
                     }
+                    break;
                 }
             }
             inst->delay_write_idx = (inst->delay_write_idx + 1) & DELAY_BUFFER_MASK;
@@ -2149,7 +2575,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             dr = dr * (1.0f - mix) + out_r * mix;
         }
 
-        /* Reverb: 4 parallel combs summed + 2 series allpass per channel. */
+        /* Reverb: 4 parallel combs summed + 2 series allpass per channel.
+         * Bokeh controls allpass diffusion. Low cut HPs the reverb output. */
         float wl = dl, wr = dr;
         if (inst->reverb_mix > 0.0f) {
             float rl =
@@ -2164,8 +2591,23 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 comb_process(&inst->rev_comb_r[3], dr);
             rl *= 0.25f;
             rr *= 0.25f;
-            rl = allpass_process(&inst->rev_ap_l[1], allpass_process(&inst->rev_ap_l[0], rl));
-            rr = allpass_process(&inst->rev_ap_r[1], allpass_process(&inst->rev_ap_r[0], rr));
+            float ap_coef = 0.30f + inst->reverb_bokeh * 0.40f;  /* 0.30..0.70 */
+            rl = allpass_process(&inst->rev_ap_l[1],
+                 allpass_process(&inst->rev_ap_l[0], rl, ap_coef), ap_coef);
+            rr = allpass_process(&inst->rev_ap_r[1],
+                 allpass_process(&inst->rev_ap_r[0], rr, ap_coef), ap_coef);
+
+            /* Low cut: one-pole HP on reverb output. coef 1 = no cut,
+             * coef → 0 = heavier cut. */
+            if (inst->reverb_lowcut > 0.0f) {
+                float hp_coef = 1.0f - inst->reverb_lowcut * 0.5f;
+                float pl = inst->reverb_hp_l;
+                float pr = inst->reverb_hp_r;
+                inst->reverb_hp_l = hp_coef * (pl + rl - inst->reverb_hp_l);
+                inst->reverb_hp_r = hp_coef * (pr + rr - inst->reverb_hp_r);
+                rl = inst->reverb_hp_l;
+                rr = inst->reverb_hp_r;
+            }
 
             wl = dl * (1.0f - inst->reverb_mix) + rl * inst->reverb_mix;
             wr = dr * (1.0f - inst->reverb_mix) + rr * inst->reverb_mix;
