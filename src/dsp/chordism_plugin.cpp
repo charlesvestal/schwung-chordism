@@ -280,19 +280,22 @@ struct Preset {
     float grind;
     float bit_shift;
     float decimator;
+    int arp_enabled;
+    float arp_tempo;
+    int arp_direction;
 };
 
 static const Preset PRESETS[] = {
-/*  name           chord  spread rot detune width  waveforms          shapes              morphI morphIn panI panIn fmM fmA  lfoR lfoD lfoS vibD vibS vibDly swpA swpR gld  cutoff reso mode slope fEnvA fEnvD fEnvAmt fLfoR fLfoD fLfoS fLfoSh drive  A     R     vol   rvMix rvDec rvDmp dlMix dlT  dlFb dlTn grnd bShf dec
+/*  name           chord  spread rot detune width  waveforms          shapes              morphI morphIn panI panIn fmM fmA  lfoR lfoD lfoS vibD vibS vibDly swpA swpR gld  cutoff reso mode slope fEnvA fEnvD fEnvAmt fLfoR fLfoD fLfoS fLfoSh drive  A     R     vol   rvMix rvDec rvDmp dlMix dlT  dlFb dlTn grnd bShf dec   arp tempo dir
 */
-{"Init",            6,    0.5f,  0.0f, 0.0f,  1.0f,  {1,1,1,1},        {0,0,0,0},          0,    0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,1.0f,  0.0f,0,   0,    0.0f, 0.3f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.05f,0.30f,0.8f, 0.0f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f},
-{"Lush Pad",        8,    0.5f,  0.0f, 0.30f, 1.0f,  {3,3,3,3},        {0.4f,0.4f,0.4f,0.4f}, 0.4f, 0.5f,   0.5f, 0.6f, 0,  0.0f,0.15f,0.4f,0,  0.3f,0.3f,0.3f,  0.0f,0.5f,0.4f,0.5f,  0.4f,0,   0,    0.1f, 0.6f, 0.3f,    0.05f,0.3f, 0.3f, 0,    0.05f, 0.25f,0.60f,0.7f, 0.55f,0.7f, 0.4f, 0.1f, 0.35f,0.3f,0.5f,0.0f,0.0f,0.0f},
-{"FM Bell",         6,    0.5f,  0.0f, 0.05f, 0.8f,  {1,1,1,1},        {0,0,0,0},          0.2f, 0.3f,   0.0f, 0.0f, 0,  0.40f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.7f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.55f,0.7f, 0.35f,0.6f, 0.2f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f},
-{"Plucky Lead",     13,   0.5f,  0.0f, 0.0f,  0.6f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.0f,0,   0,    0.0f, 0.25f, 0.85f,  0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.2f, 0.5f, 0.4f, 0.15f,0.4f,0.45f,0.5f,0.0f,0.0f,0.0f},
-{"Filtered Sweep",  6,    0.5f,  0.0f, 0.0f,  0.8f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.4f, 0.4f, 0,  0.0f,0.45f,0.9f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.30f, 0.7f, 0,   1,    0.0f, 0.5f, 0.0f,    0.5f, 0.7f, 0.55f,0,    0.15f, 0.05f,0.40f,0.7f, 0.4f, 0.7f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f},
-{"Ambient Drone",   0,    0.5f,  0.0f, 0.10f, 1.0f,  {1,2,2,1},        {0.6f,0.6f,0.3f,0.3f}, 0.6f, 0.4f,   0.2f, 0.3f, 0,  0.0f,0.10f,0.3f,5, 0.2f,0.45f,0.6f,  0.0f,0.5f,0.0f,0.5f,  0.5f,0,   0,    0.0f, 0.5f, 0.0f,    0.10f,0.4f, 0.5f, 0,    0.0f,  0.5f, 0.80f,0.7f, 0.7f, 0.85f,0.3f, 0.3f, 0.6f,0.55f,0.5f,0.0f,0.0f,0.0f},
-{"Arp Bliss",       6,    0.5f,  0.0f, 0.0f,  0.9f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.3f, 0.4f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.5f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.4f, 0.6f, 0.4f, 0.3f, 0.4f,0.55f,0.6f,0.0f,0.0f,0.0f},
-{"Lo-Fi Stab",      2,    0.5f,  0.0f, 0.0f,  0.7f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.0f, 0.0f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.0f,0,   0,    0.0f, 0.35f, 0.4f,   0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.25f,0.7f, 0.2f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.5f,0.3f,0.5f},
+{"Init",            6,    0.5f,  0.0f, 0.0f,  1.0f,  {1,1,1,1},        {0,0,0,0},          0,    0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,1.0f,  0.0f,0,   0,    0.0f, 0.3f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.05f,0.30f,0.8f, 0.0f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0},
+{"Lush Pad",        8,    0.5f,  0.0f, 0.30f, 1.0f,  {3,3,3,3},        {0.4f,0.4f,0.4f,0.4f}, 0.4f, 0.5f,   0.5f, 0.6f, 0,  0.0f,0.15f,0.4f,0,  0.3f,0.3f,0.3f,  0.0f,0.5f,0.4f,0.5f,  0.4f,0,   0,    0.1f, 0.6f, 0.3f,    0.05f,0.3f, 0.3f, 0,    0.05f, 0.25f,0.60f,0.7f, 0.55f,0.7f, 0.4f, 0.1f, 0.35f,0.3f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0},
+{"FM Bell",         6,    0.5f,  0.0f, 0.05f, 0.8f,  {1,1,1,1},        {0,0,0,0},          0.2f, 0.3f,   0.0f, 0.0f, 0,  0.40f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.7f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.55f,0.7f, 0.35f,0.6f, 0.2f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0},
+{"Plucky Lead",     13,   0.5f,  0.0f, 0.0f,  0.6f,  {3,3,3,3},        {0.2f,0.2f,0.2f,0.2f}, 0,   0,      0,   0,    0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.0f,0,   0,    0.0f, 0.25f, 0.85f,  0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.2f, 0.5f, 0.4f, 0.15f,0.4f,0.45f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0},
+{"Filtered Sweep",  6,    0.5f,  0.0f, 0.0f,  0.8f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.4f, 0.4f, 0,  0.0f,0.45f,0.4f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.45f, 0.4f, 0,   0,    0.0f, 0.5f, 0.0f,    0.4f, 0.35f,0.3f, 0,    0.10f, 0.05f,0.40f,0.6f, 0.4f, 0.7f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.0f,0.0f,0.0f,  0,  0.4f,  0},
+{"Ambient Drone",   0,    0.5f,  0.0f, 0.10f, 1.0f,  {1,2,2,1},        {0.6f,0.6f,0.3f,0.3f}, 0.6f, 0.4f,   0.2f, 0.3f, 0,  0.0f,0.10f,0.3f,5, 0.2f,0.45f,0.6f,  0.0f,0.5f,0.0f,0.5f,  0.5f,0,   0,    0.0f, 0.5f, 0.0f,    0.10f,0.4f, 0.5f, 0,    0.0f,  0.5f, 0.80f,0.7f, 0.7f, 0.85f,0.3f, 0.3f, 0.6f,0.55f,0.5f,0.0f,0.0f,0.0f,  0,  0.4f,  0},
+{"Arp Bliss",       6,    0.5f,  0.0f, 0.0f,  0.9f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.3f, 0.4f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.5f,  0.0f,0,   0,    0.0f, 0.5f, 0.0f,    0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.30f,0.7f, 0.4f, 0.6f, 0.4f, 0.3f, 0.4f,0.55f,0.6f,0.0f,0.0f,0.0f,  1,  0.75f, 0},
+{"Lo-Fi Stab",      2,    0.5f,  0.0f, 0.0f,  0.7f,  {3,3,3,3},        {0,0,0,0},          0,   0,      0.0f, 0.0f, 0,  0.0f,0.0f,0.0f,0,  0.0f,0.5f,0.2f,  0.0f,0.5f,0.0f,0.40f, 0.0f,0,   0,    0.0f, 0.35f, 0.4f,   0.0f, 0.0f, 0.0f, 0,    0.0f,  0.0f, 0.25f,0.7f, 0.2f, 0.5f, 0.3f, 0.0f, 0.3f,0.4f,0.7f,0.5f,0.3f,0.5f,  0,  0.4f,  0},
 };
 static const int NUM_PRESETS = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
@@ -658,6 +661,7 @@ static void vibrato_recompute(chordism_instance_t *inst) {
  * helpers, which are defined further down. */
 static void filter_recompute(chordism_instance_t *inst);
 static void sweep_recompute(chordism_instance_t *inst);
+static void arp_recompute(chordism_instance_t *inst);
 static void env_recompute_rates(AREnv *env, float attack01, float release01);
 static void aenv_recompute_rates(ADEnv *env, float attack01, float decay01);
 
@@ -716,6 +720,9 @@ static void preset_apply(chordism_instance_t *inst, int idx) {
     inst->grind = p->grind;
     inst->bit_shift = p->bit_shift;
     inst->decimator = p->decimator;
+    inst->arp_enabled = p->arp_enabled;
+    inst->arp_tempo = p->arp_tempo;
+    inst->arp_direction = p->arp_direction;
 
     /* Recompute derived values. */
     morph_recompute(inst);
@@ -724,6 +731,7 @@ static void preset_apply(chordism_instance_t *inst, int idx) {
     reverb_recompute(inst);
     vibrato_recompute(inst);
     sweep_recompute(inst);
+    arp_recompute(inst);
     inst->shape_lfo.phase_inc = lfo_rate_to_hz(inst->lfo_rate) / SAMPLE_RATE;
     inst->shape_lfo.shape = inst->lfo_shape;
     inst->filter_lfo_phase_inc = lfo_rate_to_hz(inst->filter_lfo_rate) / SAMPLE_RATE;
@@ -1769,7 +1777,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "arp_direction") == 0) {
         return snprintf(buf, buf_len, "%d", inst->arp_direction);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.2.0");
+        return snprintf(buf, buf_len, "0.2.1");
     }
     buf[0] = '\0';
     return 0;
