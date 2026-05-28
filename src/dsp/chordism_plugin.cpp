@@ -167,8 +167,7 @@ struct Voice {
     float phase;
     float phase_inc;
     float velocity;
-    float pan_l;         /* equal-power L gain (cos(pan*π/2)) */
-    float pan_r;         /* equal-power R gain (sin(pan*π/2)) */
+    float pan_offset;    /* (chord_step_norm - 0.5), -0.5..+0.5. Pan scales by inst->width per sample. */
     AREnv env;
 };
 
@@ -452,17 +451,12 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
     v->phase_inc = hz / SAMPLE_RATE;
     v->velocity = (float)velocity / 127.0f;
 
-    /* Pan: spread chord steps from L (step 0) to R (step CHORD_SIZE-1).
-     * width scales the spread; at width=0 all voices sit center. */
+    /* Pan offset is fixed per voice (chord position). The render loop applies
+     * the live `width` knob value each sample, so pan responds in realtime. */
     float norm = (CHORD_SIZE > 1)
         ? ((float)chord_step / (float)(CHORD_SIZE - 1))   /* 0..1 across chord */
         : 0.5f;
-    float pan = 0.5f + (norm - 0.5f) * inst->width;
-    if (pan < 0.0f) pan = 0.0f;
-    if (pan > 1.0f) pan = 1.0f;
-    float pan_angle = pan * 1.5707963267948966f;   /* π/2 */
-    v->pan_l = cosf(pan_angle);
-    v->pan_r = sinf(pan_angle);
+    v->pan_offset = norm - 0.5f;
 
     env_recompute_rates(&v->env, inst->attack, inst->release);
     /* Reset env value so each voice starts from 0 — voice steal already
@@ -713,7 +707,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "filter_env_depth") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.14");
+        return snprintf(buf, buf_len, "0.0.15");
     }
     buf[0] = '\0';
     return 0;
@@ -792,8 +786,17 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             if (v->phase >= 1.0f) v->phase -= 1.0f;
 
             float amp = s * v->env.value * v->velocity * voice_gain;
-            l_mix += amp * v->pan_l;
-            r_mix += amp * v->pan_r;
+
+            /* Realtime equal-power pan from live width knob + voice's fixed
+             * chord position. sqrt-based: L^2 + R^2 = 1. */
+            float pan = 0.5f + v->pan_offset * inst->width;
+            if (pan < 0.0f) pan = 0.0f;
+            if (pan > 1.0f) pan = 1.0f;
+            float pan_l = sqrtf(1.0f - pan);
+            float pan_r = sqrtf(pan);
+
+            l_mix += amp * pan_l;
+            r_mix += amp * pan_r;
         }
 
         /* Filter coefficients: use precomputed static values, unless filter
