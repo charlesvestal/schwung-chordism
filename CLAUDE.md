@@ -1,6 +1,6 @@
 # Schwung Chordism
 
-External Schwung module. Clean-room DVNA-inspired chord-based polyphonic synth, sound_generator chain slot.
+External Schwung module. Chord-based polyphonic synth, sound_generator chain slot.
 
 ## Build / Deploy
 
@@ -26,4 +26,4 @@ Milestone 1: skeleton + silent plugin. See `../schwung/docs/plans/2026-05-27-cho
 
 ## License
 
-MIT. Not affiliated with or endorsed by Doboz.
+MIT.

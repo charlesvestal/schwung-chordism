@@ -54,7 +54,7 @@ static const int   HELD_STACK_MAX = 16;
 
 /* Scale quantizer LUTs — semitone offsets from scale root, ascending.
  * Each row's last value is the row count (so we can pack variable-length
- * scales in a fixed-width array). DVNA-spec list. */
+ * scales in a fixed-width array). */
 #define MAX_SCALE_NOTES 12
 static const int SCALE_TABLE[25][MAX_SCALE_NOTES + 1] = {
     /* Chromatic */         { 0,1,2,3,4,5,6,7,8,9,10,11, 12 },
@@ -109,7 +109,7 @@ static int scale_quantize(int note, int scale_idx, int scale_root) {
     return scale_root + octave * 12 + best_pc;
 }
 
-/* Chord LUT — DVNA-spec chord types. Each row is CHORD_SIZE semitone offsets
+/* Chord LUT — chord types. Each row is CHORD_SIZE semitone offsets
  * from the root note (in MIDI semitones, so 12 = octave). */
 enum ChordType {
     CHORD_UNISON_OCTAVES = 0,
@@ -564,8 +564,8 @@ struct chordism_instance_t {
     int   interval_3;
     int   chord_pc[12];      /* per-pitch-class chord type for Chord Multi */
 
-    /* Per-osc shape LFO phase offsets (DVNA "LFO Phase" — phase offset per
-     * oscillator, applied on top of the shared shape LFO phase). */
+    /* Per-osc shape LFO phase offsets — phase offset per oscillator,
+     * applied on top of the shared shape LFO phase. */
     float shape_lfo_phase_offsets[CHORD_SIZE];
 
     /* Modulation source matrix. Single source globally, routed to multiple
@@ -3095,7 +3095,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             float inc = v->phase_inc * voice_vib_ratio;
 
             /* Per-osc shape: each voice's shape LFO uses a phase OFFSET from
-             * the shared LFO phase (DVNA spec — independent per-osc phases). */
+             * the shared LFO phase (independent per-osc phases). */
             float voice_lfo_phase = lfo->phase + inst->shape_lfo_phase_offsets[v->chord_step];
             voice_lfo_phase -= floorf(voice_lfo_phase);
             float voice_shape_lfo = lfo_sample(lfo->shape, voice_lfo_phase) * inst->lfo_depth;

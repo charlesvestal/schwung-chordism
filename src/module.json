@@ -3,7 +3,7 @@
   "name": "Chordism",
   "abbrev": "CH",
   "version": "0.3.8",
-  "description": "Chord-based polyphonic synthesizer with morphing mixer (DVNA-inspired)",
+  "description": "Chord-based polyphonic synthesizer with morphing mixer",
   "author": "charlesvestal",
   "license": "MIT",
   "dsp": "dsp.so",
