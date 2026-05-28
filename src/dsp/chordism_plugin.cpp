@@ -548,12 +548,13 @@ struct chordism_instance_t {
     int   scale_index;       /* 0..NUM_SCALES-1; 0 = chromatic (no quantize) */
     int   scale_root;        /* MIDI pitch class 0..11 — root of the scale */
 
-    /* Tuning mode: 0 = Chord (uses chord_type LUT), 1 = Interval (uses
-     * user-settable intervals for voices 1..3; voice 0 is always root). */
+    /* Tuning mode: 0 = Chord Single, 1 = Interval Single, 2 = Chord Multi
+     * (each pitch class gets its own chord_type). */
     int   tuning_mode;
     int   interval_1;        /* -24..+24 semitones */
     int   interval_2;
     int   interval_3;
+    int   chord_pc[12];      /* per-pitch-class chord type for Chord Multi */
 
     /* Per-osc shape LFO phase offsets (DVNA "LFO Phase" — phase offset per
      * oscillator, applied on top of the shared shape LFO phase). */
@@ -1408,10 +1409,19 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
     release_all_voices(inst);
 
     int base = inst->next_chord_base;
+    /* Pick which chord_type to use based on tuning mode.
+     *  0 = Chord Single  → inst->chord_type
+     *  1 = Interval      → user intervals (chord_type ignored)
+     *  2 = Chord Multi   → per-pitch-class chord_pc[root_note % 12] */
     int chord = inst->chord_type;
+    if (inst->tuning_mode == 2) {
+        int pc = root_note % 12;
+        if (pc < 0) pc += 12;
+        chord = inst->chord_pc[pc];
+    }
     if (chord < 0) chord = 0;
     if (chord >= NUM_CHORDS) chord = NUM_CHORDS - 1;
-    /* Tuning mode: Chord uses the LUT; Interval uses user-settable intervals. */
+
     int interval_buf[CHORD_SIZE];
     const int *intervals;
     if (inst->tuning_mode == 1) {
@@ -1662,10 +1672,11 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->fm_position = 0;
     inst->scale_index = 0;          /* chromatic — no quantization */
     inst->scale_root = 0;           /* C */
-    inst->tuning_mode = 0;          /* Chord */
+    inst->tuning_mode = 0;          /* Chord (Single) */
     inst->interval_1 = 4;           /* major third */
     inst->interval_2 = 7;           /* perfect fifth */
     inst->interval_3 = 12;          /* octave */
+    for (int i = 0; i < 12; ++i) inst->chord_pc[i] = CHORD_MAJOR;
     inst->shape_lfo_phase_offsets[0] = 0.0f;
     inst->shape_lfo_phase_offsets[1] = 0.25f;
     inst->shape_lfo_phase_offsets[2] = 0.5f;
@@ -2240,7 +2251,21 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->scale_index = s;
         }
     } else if (strcmp(key, "tuning_mode") == 0) {
-        if (val) inst->tuning_mode = atoi(val) ? 1 : 0;
+        if (val) {
+            int m = atoi(val);
+            if (m < 0) m = 0;
+            if (m > 2) m = 2;
+            inst->tuning_mode = m;
+        }
+    } else if (strncmp(key, "chord_pc_", 9) == 0) {
+        /* chord_pc_0..chord_pc_11 (or 0..9 single digit + 10/11 two digit). */
+        int pc = atoi(key + 9);
+        if (val && pc >= 0 && pc < 12) {
+            int c = atoi(val);
+            if (c < 0) c = 0;
+            if (c >= NUM_CHORDS) c = NUM_CHORDS - 1;
+            inst->chord_pc[pc] = c;
+        }
     } else if (strcmp(key, "interval_1") == 0) {
         if (val) {
             int v = atoi(val);
@@ -2327,7 +2352,8 @@ static const char *ui_hierarchy_json =
         "{\"level\":\"morph\",\"label\":\"Morph\"},"
         "{\"level\":\"mixer\",\"label\":\"Mixer\"},"
         "{\"level\":\"scale\",\"label\":\"Scale\"},"
-        "{\"level\":\"ctrl\",\"label\":\"Ctrl Src\"}"
+        "{\"level\":\"ctrl\",\"label\":\"Ctrl Src\"},"
+        "{\"level\":\"chordmulti\",\"label\":\"ChordMulti\"}"
       "]"
     "},"
     "\"osc\":{"
@@ -2399,6 +2425,13 @@ static const char *ui_hierarchy_json =
       "\"children\":null,"
       "\"knobs\":[\"scale_index\",\"scale_root\",\"tuning_mode\",\"interval_1\",\"interval_2\",\"interval_3\"],"
       "\"params\":[\"scale_index\",\"scale_root\",\"tuning_mode\",\"interval_1\",\"interval_2\",\"interval_3\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"chordmulti\":{"
+      "\"name\":\"Chord Multi\","
+      "\"children\":null,"
+      "\"knobs\":[\"chord_pc_0\",\"chord_pc_1\",\"chord_pc_2\",\"chord_pc_3\",\"chord_pc_4\",\"chord_pc_5\",\"chord_pc_6\",\"chord_pc_7\"],"
+      "\"params\":[\"chord_pc_0\",\"chord_pc_1\",\"chord_pc_2\",\"chord_pc_3\",\"chord_pc_4\",\"chord_pc_5\",\"chord_pc_6\",\"chord_pc_7\",\"chord_pc_8\",\"chord_pc_9\",\"chord_pc_10\",\"chord_pc_11\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"ctrl\":{"
@@ -2516,7 +2549,19 @@ static const char *chain_params_json =
   "{\"key\":\"arp_clock_division\",\"name\":\"Clk Div\",\"type\":\"enum\",\"options\":[\"1/4\",\"1/4T\",\"1/8\",\"1/8T\",\"1/16\",\"1/32\"],\"default\":2},"
   "{\"key\":\"scale_index\",\"name\":\"Scale\",\"type\":\"enum\",\"options\":[\"Chromatic\",\"Major\",\"Minor\",\"Harm Min\",\"Pent Maj\",\"Pent Min\",\"Diminished\",\"Dorian\",\"Phrygian\",\"Lydian\",\"Mixolyd\",\"Locrian\",\"Blues Maj\",\"Blues Min\",\"Arabic\",\"Arabic2\",\"Hijaz\",\"Iwato\",\"Pelog\",\"Slendro\",\"Folk\",\"Japanese\",\"Gypsy\",\"Flamenco\",\"Whole Tone\"],\"default\":0},"
   "{\"key\":\"scale_root\",\"name\":\"Scale Rt\",\"type\":\"enum\",\"options\":[\"C\",\"C#\",\"D\",\"D#\",\"E\",\"F\",\"F#\",\"G\",\"G#\",\"A\",\"A#\",\"B\"],\"default\":0},"
-  "{\"key\":\"tuning_mode\",\"name\":\"Tuning\",\"type\":\"enum\",\"options\":[\"Chord\",\"Interval\"],\"default\":0},"
+  "{\"key\":\"tuning_mode\",\"name\":\"Tuning\",\"type\":\"enum\",\"options\":[\"Chord\",\"Interval\",\"Chord Multi\"],\"default\":0},"
+  "{\"key\":\"chord_pc_0\",\"name\":\"C\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_1\",\"name\":\"C#\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_2\",\"name\":\"D\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_3\",\"name\":\"D#\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_4\",\"name\":\"E\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_5\",\"name\":\"F\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_6\",\"name\":\"F#\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_7\",\"name\":\"G\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_8\",\"name\":\"G#\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_9\",\"name\":\"A\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_10\",\"name\":\"A#\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
+  "{\"key\":\"chord_pc_11\",\"name\":\"B\",\"type\":\"enum\",\"options\":[\"Oct\",\"5th\",\"Min\",\"Min7\",\"Min9\",\"Min11\",\"Maj\",\"Maj7\",\"Maj9\",\"Sus4\",\"6/9\",\"Min6\",\"10\",\"Dom7\",\"Dom7b9\",\"HalfDim\"],\"default\":6},"
   "{\"key\":\"interval_1\",\"name\":\"Int 1\",\"type\":\"int\",\"min\":-24,\"max\":24,\"step\":1,\"default\":4},"
   "{\"key\":\"interval_2\",\"name\":\"Int 2\",\"type\":\"int\",\"min\":-24,\"max\":24,\"step\":1,\"default\":7},"
   "{\"key\":\"interval_3\",\"name\":\"Int 3\",\"type\":\"int\",\"min\":-24,\"max\":24,\"step\":1,\"default\":12},"
@@ -2761,6 +2806,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->scale_root);
     } else if (key && strcmp(key, "tuning_mode") == 0) {
         return snprintf(buf, buf_len, "%d", inst->tuning_mode);
+    } else if (key && strncmp(key, "chord_pc_", 9) == 0) {
+        int pc = atoi(key + 9);
+        if (pc >= 0 && pc < 12) {
+            return snprintf(buf, buf_len, "%d", inst->chord_pc[pc]);
+        }
+        return 0;
     } else if (key && strcmp(key, "interval_1") == 0) {
         return snprintf(buf, buf_len, "%d", inst->interval_1);
     } else if (key && strcmp(key, "interval_2") == 0) {
@@ -2784,7 +2835,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "ctrl_to_fm") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_fm);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.3.4");
+        return snprintf(buf, buf_len, "0.3.5");
     }
     buf[0] = '\0';
     return 0;
