@@ -2859,7 +2859,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "ctrl_to_fm") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_fm);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.3.7");
+        return snprintf(buf, buf_len, "0.3.8");
     }
     buf[0] = '\0';
     return 0;
@@ -2981,10 +2981,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             inst->vib_ramp_value += inst->vib_ramp_inc;
             if (inst->vib_ramp_value > 1.0f) inst->vib_ramp_value = 1.0f;
         }
-        /* Vibrato depth modulation: still gets aftertouch boost (legacy);
-         * additionally routed via control-source matrix. */
+        /* Vibrato depth: base + control-source matrix. (Aftertouch no longer
+         * goes here; it's hardcoded to filter cutoff instead — see below.) */
         float vib_depth_eff = inst->vib_depth
-                            + inst->aftertouch * 0.5f
                             + inst->ctrl_value * inst->ctrl_to_vib * 0.5f;
         if (vib_depth_eff > 1.0f) vib_depth_eff = 1.0f;
         if (vib_depth_eff < 0.0f) vib_depth_eff = 0.0f;
@@ -3172,8 +3171,11 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         bool env_on = inst->filter_env_depth != 0.0f;
         bool lfo_on = inst->filter_lfo_depth != 0.0f;
         bool ctrl_on = inst->ctrl_to_cutoff != 0.0f;
+        /* Aftertouch is hardcoded to open the filter — always recompute coefs
+         * when the user is pressing pads. */
+        bool at_on = inst->aftertouch > 0.0f;
 
-        if (env_on || lfo_on || ctrl_on) {
+        if (env_on || lfo_on || ctrl_on || at_on) {
             float env_val = env_on ? aenv_tick(inst, &inst->filter_env) : 0.0f;
             float env_mod = env_val * inst->filter_env_depth;
 
@@ -3198,8 +3200,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             }
 
             float ctrl_mod = inst->ctrl_value * inst->ctrl_to_cutoff * 0.5f;
-            float eff_l = inst->filter_cutoff + env_mod + lfo_l_mod + ctrl_mod;
-            float eff_r = inst->filter_cutoff + env_mod + lfo_r_mod + ctrl_mod;
+            float at_mod = inst->aftertouch * 0.4f;  /* press harder = filter opens */
+            float eff_l = inst->filter_cutoff + env_mod + lfo_l_mod + ctrl_mod + at_mod;
+            float eff_r = inst->filter_cutoff + env_mod + lfo_r_mod + ctrl_mod + at_mod;
             if (eff_l < 0.0f) eff_l = 0.0f; if (eff_l > 1.0f) eff_l = 1.0f;
             if (eff_r < 0.0f) eff_r = 0.0f; if (eff_r > 1.0f) eff_r = 1.0f;
 
