@@ -134,6 +134,14 @@ static const float LEVEL_MORPH_LUT[NUM_LEVEL_MORPHS][CHORD_SIZE] = {
  * Comb delays staggered with prime-ish lengths to avoid resonant pile-up.
  * Allpass delays much shorter than combs (diffusion stage). Stereo offset
  * applied to right-channel delay lengths for natural width. */
+/* Delay — 65536-sample ring buffer (~1.486 s @ 44.1k). Power-of-two for cheap
+ * mask-based wrap. Per-channel (true stereo delay). */
+static const int DELAY_BUFFER_SIZE = 65536;
+static const int DELAY_BUFFER_MASK = DELAY_BUFFER_SIZE - 1;
+static const float DELAY_TIME_MIN_S = 0.005f;
+static const float DELAY_TIME_MAX_S = 1.4f;
+static const float DELAY_FEEDBACK_MAX = 0.95f;
+
 static const int REVERB_COMB_L[4] = { 1557, 1617, 1491, 1422 };
 static const int REVERB_COMB_R[4] = { 1580, 1640, 1514, 1445 };
 static const int REVERB_ALLPASS_L[2] = { 556, 441 };
@@ -324,6 +332,17 @@ struct chordism_instance_t {
     CombFilter rev_comb_r[4];
     AllpassFilter rev_ap_l[2];
     AllpassFilter rev_ap_r[2];
+
+    /* Delay */
+    float delay_mix;
+    float delay_time;       /* 0..1 → DELAY_TIME_MIN_S..MAX_S */
+    float delay_feedback;   /* 0..1 → 0..DELAY_FEEDBACK_MAX */
+    float delay_tone;       /* 0..1 → bright LP coef on feedback */
+    float delay_buf_l[DELAY_BUFFER_SIZE];
+    float delay_buf_r[DELAY_BUFFER_SIZE];
+    int   delay_write_idx;
+    float delay_lp_l;
+    float delay_lp_r;
 
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
@@ -757,6 +776,15 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->decim_counter = 0;
     inst->decim_hold_l = 0.0f;
     inst->decim_hold_r = 0.0f;
+    inst->delay_mix = 0.0f;
+    inst->delay_time = 0.3f;
+    inst->delay_feedback = 0.4f;
+    inst->delay_tone = 0.7f;
+    inst->delay_write_idx = 0;
+    inst->delay_lp_l = 0.0f;
+    inst->delay_lp_r = 0.0f;
+    memset(inst->delay_buf_l, 0, sizeof(inst->delay_buf_l));
+    memset(inst->delay_buf_r, 0, sizeof(inst->delay_buf_r));
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
     inst->filter_mode = FILT_LP;
@@ -942,6 +970,14 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "morph_intensity") == 0) {
         inst->morph_intensity = param_from_string(val, inst->morph_intensity);
         morph_recompute(inst);
+    } else if (strcmp(key, "delay_mix") == 0) {
+        inst->delay_mix = param_from_string(val, inst->delay_mix);
+    } else if (strcmp(key, "delay_time") == 0) {
+        inst->delay_time = param_from_string(val, inst->delay_time);
+    } else if (strcmp(key, "delay_feedback") == 0) {
+        inst->delay_feedback = param_from_string(val, inst->delay_feedback);
+    } else if (strcmp(key, "delay_tone") == 0) {
+        inst->delay_tone = param_from_string(val, inst->delay_tone);
     }
 }
 
@@ -962,7 +998,8 @@ static const char *ui_hierarchy_json =
         "{\"level\":\"filter\",\"label\":\"Filter\"},"
         "{\"level\":\"mod\",\"label\":\"Modulation\"},"
         "{\"level\":\"env\",\"label\":\"Envelope\"},"
-        "{\"level\":\"fx\",\"label\":\"FX\"}"
+        "{\"level\":\"fx\",\"label\":\"FX\"},"
+        "{\"level\":\"delay\",\"label\":\"Delay\"}"
       "]"
     "},"
     "\"osc\":{"
@@ -998,6 +1035,13 @@ static const char *ui_hierarchy_json =
       "\"children\":null,"
       "\"knobs\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"grind\",\"bit_shift\",\"decimator\"],"
       "\"params\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"grind\",\"bit_shift\",\"decimator\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"delay\":{"
+      "\"name\":\"Delay\","
+      "\"children\":null,"
+      "\"knobs\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone\"],"
+      "\"params\":[\"delay_mix\",\"delay_time\",\"delay_feedback\",\"delay_tone\"],"
       "\"navigate_to\":\"root\""
     "}"
   "}"
@@ -1039,7 +1083,11 @@ static const char *chain_params_json =
   "{\"key\":\"reverb_damp\",\"name\":\"Verb Damp\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
   "{\"key\":\"grind\",\"name\":\"Grind\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"bit_shift\",\"name\":\"Shift\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
-  "{\"key\":\"decimator\",\"name\":\"Decim\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0}"
+  "{\"key\":\"decimator\",\"name\":\"Decim\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"delay_mix\",\"name\":\"Dly Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"delay_time\",\"name\":\"Dly Time\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
+  "{\"key\":\"delay_feedback\",\"name\":\"Dly Fbk\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.4},"
+  "{\"key\":\"delay_tone\",\"name\":\"Dly Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.7}"
 "]";
 
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
@@ -1126,8 +1174,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->morph_index);
     } else if (key && strcmp(key, "morph_intensity") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->morph_intensity);
+    } else if (key && strcmp(key, "delay_mix") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_mix);
+    } else if (key && strcmp(key, "delay_time") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_time);
+    } else if (key && strcmp(key, "delay_feedback") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_feedback);
+    } else if (key && strcmp(key, "delay_tone") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->delay_tone);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.23");
+        return snprintf(buf, buf_len, "0.1.0");
     }
     buf[0] = '\0';
     return 0;
@@ -1307,6 +1363,34 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             inst->decim_counter--;
             dl = inst->decim_hold_l;
             dr = inst->decim_hold_r;
+        }
+
+        /* Delay (stereo): runs after lo-fi, before reverb. Per-channel ring
+         * buffer; feedback path lo-passed for tape-y tone. */
+        if (inst->delay_mix > 0.0f || inst->delay_feedback > 0.0f) {
+            float delay_s = DELAY_TIME_MIN_S +
+                            inst->delay_time * (DELAY_TIME_MAX_S - DELAY_TIME_MIN_S);
+            int delay_samples = (int)(delay_s * SAMPLE_RATE);
+            if (delay_samples < 1) delay_samples = 1;
+            if (delay_samples >= DELAY_BUFFER_SIZE) delay_samples = DELAY_BUFFER_SIZE - 1;
+
+            int read_idx = (inst->delay_write_idx - delay_samples) & DELAY_BUFFER_MASK;
+            float wet_l = inst->delay_buf_l[read_idx];
+            float wet_r = inst->delay_buf_r[read_idx];
+
+            /* One-pole LP on feedback signal: tone=0 → dark, tone=1 → bright. */
+            float lp = 0.05f + inst->delay_tone * 0.95f;
+            inst->delay_lp_l = lp * wet_l + (1.0f - lp) * inst->delay_lp_l;
+            inst->delay_lp_r = lp * wet_r + (1.0f - lp) * inst->delay_lp_r;
+
+            float fb = inst->delay_feedback * DELAY_FEEDBACK_MAX;
+            inst->delay_buf_l[inst->delay_write_idx] = dl + inst->delay_lp_l * fb;
+            inst->delay_buf_r[inst->delay_write_idx] = dr + inst->delay_lp_r * fb;
+            inst->delay_write_idx = (inst->delay_write_idx + 1) & DELAY_BUFFER_MASK;
+
+            float mix = inst->delay_mix;
+            dl = dl * (1.0f - mix) + wet_l * mix;
+            dr = dr * (1.0f - mix) + wet_r * mix;
         }
 
         /* Reverb: 4 parallel combs summed + 2 series allpass per channel. */
