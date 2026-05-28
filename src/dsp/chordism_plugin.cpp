@@ -715,9 +715,91 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     }
 }
 
+/* Shadow UI menu structure — fetched by host via get_param("ui_hierarchy").
+ * String entries in `params` are key references; objects are level nav. */
+static const char *ui_hierarchy_json =
+"{"
+  "\"modes\":null,"
+  "\"levels\":{"
+    "\"root\":{"
+      "\"name\":\"Chordism\","
+      "\"children\":null,"
+      "\"knobs\":[\"chord_type\",\"width\",\"filter_cutoff\",\"filter_resonance\",\"drive\",\"waveform\",\"shape\",\"volume\"],"
+      "\"params\":["
+        "\"chord_type\",\"width\",\"filter_cutoff\",\"filter_resonance\","
+        "\"drive\",\"waveform\",\"shape\",\"volume\","
+        "{\"level\":\"filter\",\"label\":\"Filter\"},"
+        "{\"level\":\"mod\",\"label\":\"Modulation\"},"
+        "{\"level\":\"env\",\"label\":\"Envelope\"}"
+      "]"
+    "},"
+    "\"filter\":{"
+      "\"name\":\"Filter\","
+      "\"children\":null,"
+      "\"knobs\":[\"filter_cutoff\",\"filter_resonance\",\"filter_mode\",\"filter_env_attack\",\"filter_env_decay\",\"filter_env_depth\",\"drive\"],"
+      "\"params\":[\"filter_cutoff\",\"filter_resonance\",\"filter_mode\",\"filter_env_attack\",\"filter_env_decay\",\"filter_env_depth\",\"drive\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"mod\":{"
+      "\"name\":\"Modulation\","
+      "\"children\":null,"
+      "\"knobs\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"vib_delay\",\"detune\"],"
+      "\"params\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"vib_delay\",\"detune\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"env\":{"
+      "\"name\":\"Envelope\","
+      "\"children\":null,"
+      "\"knobs\":[\"attack\",\"release\",\"volume\"],"
+      "\"params\":[\"attack\",\"release\",\"volume\"],"
+      "\"navigate_to\":\"root\""
+    "}"
+  "}"
+"}";
+
+/* Param metadata for chain_params query — flat array, one entry per param. */
+static const char *chain_params_json =
+"["
+  "{\"key\":\"chord_type\",\"name\":\"Chord\",\"type\":\"enum\",\"options\":[\"Octaves\",\"Fifth\",\"Minor\",\"Min 7\",\"Min 9\",\"Min 11\",\"Major\",\"Maj 7\",\"Maj 9\",\"Sus 4\",\"6/9\",\"Min 6\",\"10th\",\"Dom 7\",\"Dom 7 b9\",\"Half Dim\"],\"default\":6},"
+  "{\"key\":\"detune\",\"name\":\"Detune\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"width\",\"name\":\"Width\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":1},"
+  "{\"key\":\"filter_cutoff\",\"name\":\"Cutoff\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":1},"
+  "{\"key\":\"filter_resonance\",\"name\":\"Reso\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"filter_mode\",\"name\":\"Mode\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"],\"default\":0},"
+  "{\"key\":\"filter_env_attack\",\"name\":\"Env A\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"filter_env_decay\",\"name\":\"Env D\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
+  "{\"key\":\"filter_env_depth\",\"name\":\"Env Amt\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
+  "{\"key\":\"drive\",\"name\":\"Drive\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"volume\",\"name\":\"Volume\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.02,\"default\":0.8},"
+  "{\"key\":\"waveform\",\"name\":\"Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
+  "{\"key\":\"shape\",\"name\":\"Shape\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"lfo_shape\",\"name\":\"LFO Wave\",\"type\":\"enum\",\"options\":[\"Triangle\",\"Ramp Up\",\"Ramp Down\",\"Square\"],\"default\":0},"
+  "{\"key\":\"lfo_rate\",\"name\":\"LFO Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"lfo_depth\",\"name\":\"LFO Dpt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"vib_depth\",\"name\":\"Vib Dpt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"vib_speed\",\"name\":\"Vib Spd\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"vib_delay\",\"name\":\"Vib Dly\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.2},"
+  "{\"key\":\"attack\",\"name\":\"Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.05},"
+  "{\"key\":\"release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3}"
+"]";
+
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (!instance || !buf || buf_len <= 0) return 0;
     auto *inst = (chordism_instance_t*)instance;
+
+    /* Metadata queries from the Shadow UI. */
+    if (key && strcmp(key, "ui_hierarchy") == 0) {
+        int len = (int)strlen(ui_hierarchy_json);
+        if (len >= buf_len) return -1;
+        memcpy(buf, ui_hierarchy_json, len + 1);
+        return len;
+    }
+    if (key && strcmp(key, "chain_params") == 0) {
+        int len = (int)strlen(chain_params_json);
+        if (len >= buf_len) return -1;
+        memcpy(buf, chain_params_json, len + 1);
+        return len;
+    }
 
     if (key && strcmp(key, "attack") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->attack);
@@ -762,7 +844,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "filter_env_depth") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.17");
+        return snprintf(buf, buf_len, "0.0.18");
     }
     buf[0] = '\0';
     return 0;
