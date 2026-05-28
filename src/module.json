@@ -2,7 +2,7 @@
   "id": "chordism",
   "name": "Chordism",
   "abbrev": "CH",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "description": "Chord-based polyphonic synthesizer with morphing mixer (DVNA-inspired)",
   "author": "charlesvestal",
   "license": "MIT",
@@ -15,65 +15,6 @@
     "midi_out": false,
     "aftertouch": true,
     "chainable": true,
-    "component_type": "sound_generator",
-    "ui_hierarchy": {
-      "levels": {
-        "root": {
-          "name": "Chordism",
-          "params": [
-            { "key": "chord_type",       "label": "Chord",   "type": "int",   "min": 0,    "max": 15,  "default": 6,    "step": 1, "options": ["Octaves","Fifth","Minor","Min 7","Min 9","Min 11","Major","Maj 7","Maj 9","Sus 4","6/9","Min 6","10th","Dom 7","Dom 7 b9","Half Dim"] },
-            { "key": "width",            "label": "Width",   "type": "float", "min": 0.0,  "max": 1.0, "default": 1.0,  "step": 0.01, "unit": "%" },
-            { "key": "filter_cutoff",    "label": "Cutoff",  "type": "float", "min": 0.0,  "max": 1.0, "default": 1.0,  "step": 0.01, "unit": "%" },
-            { "key": "filter_resonance", "label": "Reso",    "type": "float", "min": 0.0,  "max": 1.0, "default": 0.0,  "step": 0.01, "unit": "%" },
-            { "key": "drive",            "label": "Drive",   "type": "float", "min": 0.0,  "max": 1.0, "default": 0.0,  "step": 0.01, "unit": "%" },
-            { "key": "waveform",         "label": "Wave",    "type": "int",   "min": 0,    "max": 3,   "default": 0,    "step": 1, "options": ["Sine","Triangle","Saw","Square"] },
-            { "key": "shape",            "label": "Shape",   "type": "float", "min": 0.0,  "max": 1.0, "default": 0.0,  "step": 0.01, "unit": "%" },
-            { "key": "volume",           "label": "Volume",  "type": "float", "min": 0.0,  "max": 1.0, "default": 0.8,  "step": 0.02, "unit": "%" },
-            { "level": "filter",         "label": "Filter ▸" },
-            { "level": "mod",            "label": "Modulation ▸" },
-            { "level": "env",            "label": "Envelope ▸" }
-          ],
-          "knobs": ["chord_type", "width", "filter_cutoff", "filter_resonance", "drive", "waveform", "shape", "volume"]
-        },
-        "filter": {
-          "name": "Filter",
-          "params": [
-            { "key": "filter_cutoff",     "label": "Cutoff",   "type": "float", "min": 0.0,  "max": 1.0, "default": 1.0,  "step": 0.01, "unit": "%" },
-            { "key": "filter_resonance",  "label": "Reso",     "type": "float", "min": 0.0,  "max": 1.0, "default": 0.0,  "step": 0.01, "unit": "%" },
-            { "key": "filter_mode",       "label": "Mode",     "type": "int",   "min": 0,    "max": 2,   "default": 0,    "step": 1, "options": ["LP","HP","BP"] },
-            { "key": "filter_env_attack", "label": "Env A",    "type": "float", "min": 0.0,  "max": 1.0, "default": 0.0,  "step": 0.01, "unit": "%" },
-            { "key": "filter_env_decay",  "label": "Env D",    "type": "float", "min": 0.0,  "max": 1.0, "default": 0.30, "step": 0.01, "unit": "%" },
-            { "key": "filter_env_depth",  "label": "Env Amt",  "type": "float", "min": -1.0, "max": 1.0, "default": 0.0,  "step": 0.02, "unit": "%" },
-            { "key": "drive",             "label": "Drive",    "type": "float", "min": 0.0,  "max": 1.0, "default": 0.0,  "step": 0.01, "unit": "%" }
-          ],
-          "knobs": ["filter_cutoff", "filter_resonance", "filter_mode", "filter_env_attack", "filter_env_decay", "filter_env_depth", "drive"],
-          "navigate_to": "root"
-        },
-        "mod": {
-          "name": "Modulation",
-          "params": [
-            { "key": "lfo_shape", "label": "LFO Wave", "type": "int",   "min": 0,   "max": 3,   "default": 0,   "step": 1, "options": ["Triangle","Ramp Up","Ramp Down","Square"] },
-            { "key": "lfo_rate",  "label": "LFO Rate", "type": "float", "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.01, "unit": "%" },
-            { "key": "lfo_depth", "label": "LFO Dpt",  "type": "float", "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.01, "unit": "%" },
-            { "key": "vib_depth", "label": "Vib Dpt",  "type": "float", "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.01, "unit": "%" },
-            { "key": "vib_speed", "label": "Vib Spd",  "type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.01, "unit": "%" },
-            { "key": "vib_delay", "label": "Vib Dly",  "type": "float", "min": 0.0, "max": 1.0, "default": 0.2, "step": 0.01, "unit": "%" },
-            { "key": "detune",    "label": "Detune",   "type": "float", "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.01, "unit": "%" }
-          ],
-          "knobs": ["lfo_shape", "lfo_rate", "lfo_depth", "vib_depth", "vib_speed", "vib_delay", "detune"],
-          "navigate_to": "root"
-        },
-        "env": {
-          "name": "Envelope",
-          "params": [
-            { "key": "attack",  "label": "Attack",  "type": "float", "min": 0.0, "max": 1.0, "default": 0.05, "step": 0.01, "unit": "%" },
-            { "key": "release", "label": "Release", "type": "float", "min": 0.0, "max": 1.0, "default": 0.30, "step": 0.01, "unit": "%" },
-            { "key": "volume",  "label": "Volume",  "type": "float", "min": 0.0, "max": 1.0, "default": 0.8,  "step": 0.02, "unit": "%" }
-          ],
-          "knobs": ["attack", "release", "volume"],
-          "navigate_to": "root"
-        }
-      }
-    }
+    "component_type": "sound_generator"
   }
 }
