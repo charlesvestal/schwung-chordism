@@ -280,6 +280,14 @@ struct chordism_instance_t {
 
     ADEnv filter_env;
 
+    /* Lo-Fi (Quality Control) */
+    float grind;          /* 0..1 → bit reduction */
+    float bit_shift;      /* 0..1 → DC offset bias pre-crush */
+    float decimator;      /* 0..1 → sample-rate hold (0=off, 1=hold 32 samples) */
+    int   decim_counter;
+    float decim_hold_l;
+    float decim_hold_r;
+
     /* Reverb */
     float reverb_mix;    /* 0..1 dry/wet */
     float reverb_decay;  /* 0..1 → comb feedback */
@@ -691,6 +699,12 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->reverb_damp = 0.3f;
     reverb_init(inst);
     reverb_recompute(inst);
+    inst->grind = 0.0f;
+    inst->bit_shift = 0.0f;
+    inst->decimator = 0.0f;
+    inst->decim_counter = 0;
+    inst->decim_hold_l = 0.0f;
+    inst->decim_hold_r = 0.0f;
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
     inst->filter_mode = FILT_LP;
@@ -855,6 +869,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "reverb_damp") == 0) {
         inst->reverb_damp = param_from_string(val, inst->reverb_damp);
         reverb_recompute(inst);
+    } else if (strcmp(key, "grind") == 0) {
+        inst->grind = param_from_string(val, inst->grind);
+    } else if (strcmp(key, "bit_shift") == 0) {
+        inst->bit_shift = param_from_string(val, inst->bit_shift);
+    } else if (strcmp(key, "decimator") == 0) {
+        inst->decimator = param_from_string(val, inst->decimator);
     }
 }
 
@@ -901,8 +921,8 @@ static const char *ui_hierarchy_json =
     "\"fx\":{"
       "\"name\":\"FX\","
       "\"children\":null,"
-      "\"knobs\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\"],"
-      "\"params\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\"],"
+      "\"knobs\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"grind\",\"bit_shift\",\"decimator\"],"
+      "\"params\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\",\"grind\",\"bit_shift\",\"decimator\"],"
       "\"navigate_to\":\"root\""
     "}"
   "}"
@@ -936,7 +956,10 @@ static const char *chain_params_json =
   "{\"key\":\"release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
   "{\"key\":\"reverb_mix\",\"name\":\"Verb Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"reverb_decay\",\"name\":\"Verb Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
-  "{\"key\":\"reverb_damp\",\"name\":\"Verb Damp\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3}"
+  "{\"key\":\"reverb_damp\",\"name\":\"Verb Damp\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
+  "{\"key\":\"grind\",\"name\":\"Grind\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"bit_shift\",\"name\":\"Shift\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"decimator\",\"name\":\"Decim\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0}"
 "]";
 
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
@@ -1009,8 +1032,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->reverb_decay);
     } else if (key && strcmp(key, "reverb_damp") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->reverb_damp);
+    } else if (key && strcmp(key, "grind") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->grind);
+    } else if (key && strcmp(key, "bit_shift") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->bit_shift);
+    } else if (key && strcmp(key, "decimator") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->decimator);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.20");
+        return snprintf(buf, buf_len, "0.0.21");
     }
     buf[0] = '\0';
     return 0;
@@ -1165,6 +1194,31 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         float drive_gain = 1.0f + inst->drive * 9.0f;
         float dl = tanhf(drive_gain * fl);
         float dr = tanhf(drive_gain * fr);
+
+        /* Lo-Fi: bit grind (with optional DC shift bias), then sample-rate
+         * decimation (sample/hold). Bypassed cleanly when params are 0. */
+        if (inst->grind > 0.0f) {
+            float bits = 16.0f - inst->grind * 14.0f;   /* 16 → 2 */
+            float steps = powf(2.0f, bits) * 0.5f;      /* half because signal is ±1 */
+            float shift = inst->bit_shift * 0.5f;       /* up to ±0.5 bias */
+            float bl = dl + shift;
+            float br = dr + shift;
+            dl = (floorf(bl * steps + 0.5f) / steps) - shift;
+            dr = (floorf(br * steps + 0.5f) / steps) - shift;
+        }
+
+        if (inst->decimator > 0.0f) {
+            int hold = (int)(inst->decimator * 32.0f);
+            if (hold < 1) hold = 1;
+            if (inst->decim_counter <= 0) {
+                inst->decim_hold_l = dl;
+                inst->decim_hold_r = dr;
+                inst->decim_counter = hold;
+            }
+            inst->decim_counter--;
+            dl = inst->decim_hold_l;
+            dr = inst->decim_hold_r;
+        }
 
         /* Reverb: 4 parallel combs summed + 2 series allpass per channel. */
         float wl = dl, wr = dr;
