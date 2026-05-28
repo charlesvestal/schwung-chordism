@@ -548,6 +548,17 @@ struct chordism_instance_t {
     int   scale_index;       /* 0..NUM_SCALES-1; 0 = chromatic (no quantize) */
     int   scale_root;        /* MIDI pitch class 0..11 — root of the scale */
 
+    /* Tuning mode: 0 = Chord (uses chord_type LUT), 1 = Interval (uses
+     * user-settable intervals for voices 1..3; voice 0 is always root). */
+    int   tuning_mode;
+    int   interval_1;        /* -24..+24 semitones */
+    int   interval_2;
+    int   interval_3;
+
+    /* Per-osc shape LFO phase offsets (DVNA "LFO Phase" — phase offset per
+     * oscillator, applied on top of the shared shape LFO phase). */
+    float shape_lfo_phase_offsets[CHORD_SIZE];
+
     /* Modulation source matrix. Single source globally, routed to multiple
      * targets via per-target depth knobs (-1..+1). */
     int   ctrl_source;       /* ControlSource enum */
@@ -1400,7 +1411,18 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
     int chord = inst->chord_type;
     if (chord < 0) chord = 0;
     if (chord >= NUM_CHORDS) chord = NUM_CHORDS - 1;
-    const int *intervals = CHORD_TABLE[chord];
+    /* Tuning mode: Chord uses the LUT; Interval uses user-settable intervals. */
+    int interval_buf[CHORD_SIZE];
+    const int *intervals;
+    if (inst->tuning_mode == 1) {
+        interval_buf[0] = 0;
+        interval_buf[1] = inst->interval_1;
+        interval_buf[2] = inst->interval_2;
+        interval_buf[3] = inst->interval_3;
+        intervals = interval_buf;
+    } else {
+        intervals = CHORD_TABLE[chord];
+    }
 
     /* Spread scales intervals (0 → unison, 0.5 → original, 1 → 2× wide).
      * Rotation shifts which osc plays which chord degree. */
@@ -1640,6 +1662,14 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->fm_position = 0;
     inst->scale_index = 0;          /* chromatic — no quantization */
     inst->scale_root = 0;           /* C */
+    inst->tuning_mode = 0;          /* Chord */
+    inst->interval_1 = 4;           /* major third */
+    inst->interval_2 = 7;           /* perfect fifth */
+    inst->interval_3 = 12;          /* octave */
+    inst->shape_lfo_phase_offsets[0] = 0.0f;
+    inst->shape_lfo_phase_offsets[1] = 0.25f;
+    inst->shape_lfo_phase_offsets[2] = 0.5f;
+    inst->shape_lfo_phase_offsets[3] = 0.75f;
     inst->ctrl_source = CTRL_AFTERTOUCH;
     inst->ctrl_cc = 1;              /* MIDI CC 1 = modulation wheel */
     inst->ctrl_value = 0.0f;
@@ -2209,6 +2239,32 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (s >= NUM_SCALES) s = NUM_SCALES - 1;
             inst->scale_index = s;
         }
+    } else if (strcmp(key, "tuning_mode") == 0) {
+        if (val) inst->tuning_mode = atoi(val) ? 1 : 0;
+    } else if (strcmp(key, "interval_1") == 0) {
+        if (val) {
+            int v = atoi(val);
+            if (v < -24) v = -24;
+            if (v > 24) v = 24;
+            inst->interval_1 = v;
+        }
+    } else if (strcmp(key, "interval_2") == 0) {
+        if (val) {
+            int v = atoi(val);
+            if (v < -24) v = -24;
+            if (v > 24) v = 24;
+            inst->interval_2 = v;
+        }
+    } else if (strcmp(key, "interval_3") == 0) {
+        if (val) {
+            int v = atoi(val);
+            if (v < -24) v = -24;
+            if (v > 24) v = 24;
+            inst->interval_3 = v;
+        }
+    } else if (strncmp(key, "lfo_phase_", 10) == 0 && key[10] >= '1' && key[10] <= '0' + CHORD_SIZE && key[11] == '\0') {
+        int idx = key[10] - '1';
+        inst->shape_lfo_phase_offsets[idx] = param_from_string(val, inst->shape_lfo_phase_offsets[idx]);
     } else if (strcmp(key, "scale_root") == 0) {
         if (val) {
             int r = atoi(val);
@@ -2339,10 +2395,10 @@ static const char *ui_hierarchy_json =
       "\"navigate_to\":\"root\""
     "},"
     "\"scale\":{"
-      "\"name\":\"Scale\","
+      "\"name\":\"Scale/Tune\","
       "\"children\":null,"
-      "\"knobs\":[\"scale_index\",\"scale_root\"],"
-      "\"params\":[\"scale_index\",\"scale_root\"],"
+      "\"knobs\":[\"scale_index\",\"scale_root\",\"tuning_mode\",\"interval_1\",\"interval_2\",\"interval_3\"],"
+      "\"params\":[\"scale_index\",\"scale_root\",\"tuning_mode\",\"interval_1\",\"interval_2\",\"interval_3\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"ctrl\":{"
@@ -2460,6 +2516,14 @@ static const char *chain_params_json =
   "{\"key\":\"arp_clock_division\",\"name\":\"Clk Div\",\"type\":\"enum\",\"options\":[\"1/4\",\"1/4T\",\"1/8\",\"1/8T\",\"1/16\",\"1/32\"],\"default\":2},"
   "{\"key\":\"scale_index\",\"name\":\"Scale\",\"type\":\"enum\",\"options\":[\"Chromatic\",\"Major\",\"Minor\",\"Harm Min\",\"Pent Maj\",\"Pent Min\",\"Diminished\",\"Dorian\",\"Phrygian\",\"Lydian\",\"Mixolyd\",\"Locrian\",\"Blues Maj\",\"Blues Min\",\"Arabic\",\"Arabic2\",\"Hijaz\",\"Iwato\",\"Pelog\",\"Slendro\",\"Folk\",\"Japanese\",\"Gypsy\",\"Flamenco\",\"Whole Tone\"],\"default\":0},"
   "{\"key\":\"scale_root\",\"name\":\"Scale Rt\",\"type\":\"enum\",\"options\":[\"C\",\"C#\",\"D\",\"D#\",\"E\",\"F\",\"F#\",\"G\",\"G#\",\"A\",\"A#\",\"B\"],\"default\":0},"
+  "{\"key\":\"tuning_mode\",\"name\":\"Tuning\",\"type\":\"enum\",\"options\":[\"Chord\",\"Interval\"],\"default\":0},"
+  "{\"key\":\"interval_1\",\"name\":\"Int 1\",\"type\":\"int\",\"min\":-24,\"max\":24,\"step\":1,\"default\":4},"
+  "{\"key\":\"interval_2\",\"name\":\"Int 2\",\"type\":\"int\",\"min\":-24,\"max\":24,\"step\":1,\"default\":7},"
+  "{\"key\":\"interval_3\",\"name\":\"Int 3\",\"type\":\"int\",\"min\":-24,\"max\":24,\"step\":1,\"default\":12},"
+  "{\"key\":\"lfo_phase_1\",\"name\":\"LFO Ph 1\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"lfo_phase_2\",\"name\":\"LFO Ph 2\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.25},"
+  "{\"key\":\"lfo_phase_3\",\"name\":\"LFO Ph 3\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"lfo_phase_4\",\"name\":\"LFO Ph 4\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.75},"
   "{\"key\":\"ctrl_source\",\"name\":\"Ctrl Src\",\"type\":\"enum\",\"options\":[\"Aftertouch\",\"Random\",\"Coin Toss\",\"MIDI CC\",\"Velocity\"],\"default\":0},"
   "{\"key\":\"ctrl_cc\",\"name\":\"Ctrl CC\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1,\"default\":1},"
   "{\"key\":\"ctrl_to_cutoff\",\"name\":\"→ Cutoff\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
@@ -2695,6 +2759,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->scale_index);
     } else if (key && strcmp(key, "scale_root") == 0) {
         return snprintf(buf, buf_len, "%d", inst->scale_root);
+    } else if (key && strcmp(key, "tuning_mode") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->tuning_mode);
+    } else if (key && strcmp(key, "interval_1") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->interval_1);
+    } else if (key && strcmp(key, "interval_2") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->interval_2);
+    } else if (key && strcmp(key, "interval_3") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->interval_3);
+    } else if (key && strncmp(key, "lfo_phase_", 10) == 0 && key[10] >= '1' && key[10] <= '0' + CHORD_SIZE && key[11] == '\0') {
+        return snprintf(buf, buf_len, "%.4f", inst->shape_lfo_phase_offsets[key[10] - '1']);
     } else if (key && strcmp(key, "ctrl_source") == 0) {
         return snprintf(buf, buf_len, "%d", inst->ctrl_source);
     } else if (key && strcmp(key, "ctrl_cc") == 0) {
@@ -2710,7 +2784,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "ctrl_to_fm") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_fm);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.3.3");
+        return snprintf(buf, buf_len, "0.3.4");
     }
     buf[0] = '\0';
     return 0;
@@ -2741,6 +2815,24 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     const float master_gain = inst->volume * 16000.0f;
 
     LFO *lfo = &inst->shape_lfo;
+
+    /* Reverb mod: subtle damp coefficient modulation per block. */
+    if (inst->reverb_mod_depth > 0.0f) {
+        inst->reverb_mod_phase += inst->reverb_mod_phase_inc * (float)frames;
+        while (inst->reverb_mod_phase >= 1.0f) inst->reverb_mod_phase -= 1.0f;
+        float mod = sinf(TWO_PI * inst->reverb_mod_phase)
+                  * inst->reverb_mod_depth * 0.10f;
+        for (int i = 0; i < 4; ++i) {
+            float dp_l = inst->reverb_damp * 0.5f + mod;
+            float dp_r = inst->reverb_damp * 0.5f - mod;  /* L/R out of phase for stereo motion */
+            if (dp_l < 0.0f) dp_l = 0.0f;
+            if (dp_l > 0.95f) dp_l = 0.95f;
+            if (dp_r < 0.0f) dp_r = 0.0f;
+            if (dp_r > 0.95f) dp_r = 0.95f;
+            inst->rev_comb_l[i].damp = dp_l;
+            inst->rev_comb_r[i].damp = dp_r;
+        }
+    }
 
     /* Animated morphs: per-block, advance morph LFOs and recompute morph LUT
      * gains using effective index = base + LFO * depth. Block-rate update is
@@ -2804,7 +2896,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 }
             }
         }
-        float shape_lfo_offset = lfo_sample(lfo->shape, lfo->phase) * inst->lfo_depth;
+        /* Per-voice shape LFO offsets are computed inside the voice loop below
+         * (each voice uses lfo->phase + its own shape_lfo_phase_offsets[step]). */
 
         /* Advance vibrato LFO + delay ramp, compute pitch-shift ratio. */
         inst->vibrato_phase += inst->vibrato_phase_inc;
@@ -2927,9 +3020,14 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             float inc = v->phase_inc * voice_vib_ratio;
 
-            /* Per-osc shape + shape LFO + ctrl-source routing, clamped. */
+            /* Per-osc shape: each voice's shape LFO uses a phase OFFSET from
+             * the shared LFO phase (DVNA spec — independent per-osc phases). */
+            float voice_lfo_phase = lfo->phase + inst->shape_lfo_phase_offsets[v->chord_step];
+            voice_lfo_phase -= floorf(voice_lfo_phase);
+            float voice_shape_lfo = lfo_sample(lfo->shape, voice_lfo_phase) * inst->lfo_depth;
+
             float eff_shape = inst->shapes[v->chord_step]
-                            + shape_lfo_offset
+                            + voice_shape_lfo
                             + inst->ctrl_value * inst->ctrl_to_shape * 0.5f;
             if (eff_shape < 0.0f) eff_shape = 0.0f;
             if (eff_shape > 1.0f) eff_shape = 1.0f;
