@@ -762,7 +762,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "filter_env_depth") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.16");
+        return snprintf(buf, buf_len, "0.0.17");
     }
     buf[0] = '\0';
     return 0;
