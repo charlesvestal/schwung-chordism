@@ -107,6 +107,29 @@ static const float ENV_SILENCE = 1e-4f;
  * sharp of voice 0 at full detune. */
 static const float MAX_DETUNE_CENTS = 50.0f;
 
+/* Level morph LUT — 16 hand-authored 4-voice gain rows, musically useful
+ * variations of the chord mix. morph_index linearly interpolates between
+ * adjacent rows; morph_intensity blends the row toward "all 1.0" (flat). */
+static const int NUM_LEVEL_MORPHS = 16;
+static const float LEVEL_MORPH_LUT[NUM_LEVEL_MORPHS][CHORD_SIZE] = {
+    {1.0f, 1.0f, 1.0f, 1.0f},  /* 0  all equal */
+    {0.2f, 0.5f, 0.8f, 1.0f},  /* 1  ramp up */
+    {1.0f, 0.8f, 0.5f, 0.2f},  /* 2  ramp down */
+    {1.0f, 0.0f, 0.0f, 0.0f},  /* 3  root only */
+    {0.0f, 0.0f, 0.0f, 1.0f},  /* 4  top only */
+    {1.0f, 0.0f, 0.0f, 1.0f},  /* 5  root + top */
+    {0.0f, 1.0f, 1.0f, 0.0f},  /* 6  inner pair */
+    {1.0f, 0.0f, 1.0f, 0.0f},  /* 7  odd */
+    {0.0f, 1.0f, 0.0f, 1.0f},  /* 8  even */
+    {0.1f, 0.3f, 0.7f, 1.0f},  /* 9  log up */
+    {0.3f, 1.0f, 1.0f, 0.3f},  /* 10 middle-peak triangle */
+    {1.0f, 0.3f, 0.3f, 1.0f},  /* 11 inv-triangle */
+    {0.0f, 0.0f, 0.5f, 1.0f},  /* 12 top-heavy */
+    {1.0f, 0.7f, 0.3f, 0.0f},  /* 13 bottom-heavy */
+    {1.0f, 1.0f, 0.5f, 0.5f},  /* 14 low pair */
+    {0.5f, 0.5f, 1.0f, 1.0f},  /* 15 high pair */
+};
+
 /* Reverb (Schroeder-style: 4 parallel combs + 2 series allpass per channel).
  * Comb delays staggered with prime-ish lengths to avoid resonant pile-up.
  * Allpass delays much shorter than combs (diffusion stage). Stereo offset
@@ -223,6 +246,7 @@ struct ADEnv {
 struct Voice {
     bool active;
     int root_note;       /* MIDI root that spawned this voice (for note-off match) */
+    int chord_step;      /* 0..CHORD_SIZE-1 — position in the chord, for morph lookups */
     int waveform;        /* per-voice waveform — set at voice_start */
     float phase;
     float phase_inc;
@@ -240,6 +264,9 @@ struct chordism_instance_t {
     float volume;        /* 0..1 */
     int   waveforms[CHORD_SIZE];  /* per-osc waveform (chord step → wave) */
     float shape;         /* 0..1 — shared shape across voices */
+    float morph_index;   /* 0..1 — sweeps level-morph LUT */
+    float morph_intensity; /* 0..1 — blend flat→LUT row */
+    float morph_gains[CHORD_SIZE];  /* cached effective gain per chord step */
     float lfo_rate;      /* 0..1 — exp-mapped to Hz */
     float lfo_depth;     /* 0..1 — modulation amount on shape */
     int   lfo_shape;     /* 0..NUM_LFO_SHAPES-1 */
@@ -361,6 +388,25 @@ static float lfo_rate_to_hz(float rate01) {
 static float vib_speed_to_hz(float speed01) {
     float ratio = VIB_SPEED_MAX_HZ / VIB_SPEED_MIN_HZ;
     return VIB_SPEED_MIN_HZ * powf(ratio, speed01);
+}
+
+static void morph_recompute(chordism_instance_t *inst) {
+    float idx = inst->morph_index * (float)(NUM_LEVEL_MORPHS - 1);
+    int lo = (int)idx;
+    int hi = lo + 1;
+    if (lo < 0) lo = 0;
+    if (lo >= NUM_LEVEL_MORPHS) lo = NUM_LEVEL_MORPHS - 1;
+    if (hi >= NUM_LEVEL_MORPHS) hi = NUM_LEVEL_MORPHS - 1;
+    float frac = idx - (float)lo;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+
+    for (int i = 0; i < CHORD_SIZE; ++i) {
+        float lut = LEVEL_MORPH_LUT[lo][i] * (1.0f - frac)
+                  + LEVEL_MORPH_LUT[hi][i] * frac;
+        /* Blend flat (1.0) → lut row by intensity. */
+        inst->morph_gains[i] = 1.0f + (lut - 1.0f) * inst->morph_intensity;
+    }
 }
 
 static void reverb_init(chordism_instance_t *inst) {
@@ -594,6 +640,7 @@ static void voice_start(chordism_instance_t *inst, Voice *v,
                         int chord_step) {
     v->active = true;
     v->root_note = root_note;
+    v->chord_step = chord_step;
     v->waveform = inst->waveforms[chord_step];
     v->phase = 0.0f;
     float hz = midi_to_hz(root_note + interval_semis);
@@ -680,6 +727,9 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->volume = 0.80f;
     for (int i = 0; i < CHORD_SIZE; ++i) inst->waveforms[i] = WAVE_SINE;
     inst->shape = 0.0f;
+    inst->morph_index = 0.0f;
+    inst->morph_intensity = 0.0f;
+    morph_recompute(inst);
     inst->lfo_rate = 0.0f;
     inst->lfo_depth = 0.0f;
     inst->lfo_shape = LFO_TRIANGLE;
@@ -886,6 +936,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         inst->bit_shift = param_from_string(val, inst->bit_shift);
     } else if (strcmp(key, "decimator") == 0) {
         inst->decimator = param_from_string(val, inst->decimator);
+    } else if (strcmp(key, "morph_index") == 0) {
+        inst->morph_index = param_from_string(val, inst->morph_index);
+        morph_recompute(inst);
+    } else if (strcmp(key, "morph_intensity") == 0) {
+        inst->morph_intensity = param_from_string(val, inst->morph_intensity);
+        morph_recompute(inst);
     }
 }
 
@@ -912,8 +968,8 @@ static const char *ui_hierarchy_json =
     "\"osc\":{"
       "\"name\":\"Oscillators\","
       "\"children\":null,"
-      "\"knobs\":[\"wave_1\",\"wave_2\",\"wave_3\",\"wave_4\",\"shape\",\"detune\",\"chord_type\",\"width\"],"
-      "\"params\":[\"wave_1\",\"wave_2\",\"wave_3\",\"wave_4\",\"shape\",\"detune\",\"chord_type\",\"width\"],"
+      "\"knobs\":[\"wave_1\",\"wave_2\",\"wave_3\",\"wave_4\",\"shape\",\"morph_index\",\"morph_intensity\",\"detune\"],"
+      "\"params\":[\"wave_1\",\"wave_2\",\"wave_3\",\"wave_4\",\"shape\",\"morph_index\",\"morph_intensity\",\"detune\",\"chord_type\",\"width\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"filter\":{"
@@ -966,6 +1022,8 @@ static const char *chain_params_json =
   "{\"key\":\"wave_3\",\"name\":\"Wave 3\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
   "{\"key\":\"wave_4\",\"name\":\"Wave 4\",\"type\":\"enum\",\"options\":[\"Sine\",\"Triangle\",\"Saw\",\"Square\"],\"default\":0},"
   "{\"key\":\"shape\",\"name\":\"Shape\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"morph_index\",\"name\":\"Morph\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"morph_intensity\",\"name\":\"Morph Int\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"lfo_shape\",\"name\":\"LFO Wave\",\"type\":\"enum\",\"options\":[\"Triangle\",\"Ramp Up\",\"Ramp Down\",\"Square\"],\"default\":0},"
   "{\"key\":\"lfo_rate\",\"name\":\"LFO Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"lfo_depth\",\"name\":\"LFO Dpt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
@@ -1064,8 +1122,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->bit_shift);
     } else if (key && strcmp(key, "decimator") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->decimator);
+    } else if (key && strcmp(key, "morph_index") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->morph_index);
+    } else if (key && strcmp(key, "morph_intensity") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->morph_intensity);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.22");
+        return snprintf(buf, buf_len, "0.0.23");
     }
     buf[0] = '\0';
     return 0;
@@ -1169,7 +1231,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             if (v->phase >= 1.0f) v->phase -= 1.0f;
             else if (v->phase < 0.0f) v->phase += 1.0f;
 
-            float amp = s * v->env.value * v->velocity * voice_gain;
+            float amp = s * v->env.value * v->velocity * voice_gain
+                          * inst->morph_gains[v->chord_step];
 
             /* Realtime equal-power pan from live width knob + voice's fixed
              * chord position. sqrt-based: L^2 + R^2 = 1. */
