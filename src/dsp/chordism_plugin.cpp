@@ -107,6 +107,50 @@ static const float ENV_SILENCE = 1e-4f;
  * sharp of voice 0 at full detune. */
 static const float MAX_DETUNE_CENTS = 50.0f;
 
+/* Reverb (Schroeder-style: 4 parallel combs + 2 series allpass per channel).
+ * Comb delays staggered with prime-ish lengths to avoid resonant pile-up.
+ * Allpass delays much shorter than combs (diffusion stage). Stereo offset
+ * applied to right-channel delay lengths for natural width. */
+static const int REVERB_COMB_L[4] = { 1557, 1617, 1491, 1422 };
+static const int REVERB_COMB_R[4] = { 1580, 1640, 1514, 1445 };
+static const int REVERB_ALLPASS_L[2] = { 556, 441 };
+static const int REVERB_ALLPASS_R[2] = { 579, 464 };
+static const int REVERB_COMB_MAX = 1700;
+static const int REVERB_ALLPASS_MAX = 600;
+
+struct CombFilter {
+    float buffer[REVERB_COMB_MAX];
+    int size;        /* current delay length */
+    int idx;
+    float filter;    /* damping low-pass state */
+    float feedback;
+    float damp;
+};
+
+struct AllpassFilter {
+    float buffer[REVERB_ALLPASS_MAX];
+    int size;
+    int idx;
+};
+
+static inline float comb_process(CombFilter *c, float input) {
+    float out = c->buffer[c->idx];
+    c->filter = out * (1.0f - c->damp) + c->filter * c->damp;
+    c->buffer[c->idx] = input + c->filter * c->feedback;
+    c->idx++;
+    if (c->idx >= c->size) c->idx = 0;
+    return out;
+}
+
+static inline float allpass_process(AllpassFilter *a, float input) {
+    float bufout = a->buffer[a->idx];
+    float out = -input + bufout;
+    a->buffer[a->idx] = input + bufout * 0.5f;
+    a->idx++;
+    if (a->idx >= a->size) a->idx = 0;
+    return out;
+}
+
 /* Vibrato range. Speed exp-mapped 0.1..12 Hz, depth 0..100 cents, delay
  * linear 0..2 sec rise time (ramp from 0 to full depth after note-on). */
 static const float VIB_SPEED_MIN_HZ = 0.1f;
@@ -223,6 +267,15 @@ struct chordism_instance_t {
 
     ADEnv filter_env;
 
+    /* Reverb */
+    float reverb_mix;    /* 0..1 dry/wet */
+    float reverb_decay;  /* 0..1 → comb feedback */
+    float reverb_damp;   /* 0..1 → HF damping in feedback */
+    CombFilter rev_comb_l[4];
+    CombFilter rev_comb_r[4];
+    AllpassFilter rev_ap_l[2];
+    AllpassFilter rev_ap_r[2];
+
     LFO   shape_lfo;
     Voice voices[NUM_VOICES];
     int next_chord_base;   /* 0 or CHORD_SIZE — round-robin between voice banks */
@@ -286,6 +339,41 @@ static float lfo_rate_to_hz(float rate01) {
 static float vib_speed_to_hz(float speed01) {
     float ratio = VIB_SPEED_MAX_HZ / VIB_SPEED_MIN_HZ;
     return VIB_SPEED_MIN_HZ * powf(ratio, speed01);
+}
+
+static void reverb_init(chordism_instance_t *inst) {
+    for (int i = 0; i < 4; ++i) {
+        memset(inst->rev_comb_l[i].buffer, 0, sizeof(inst->rev_comb_l[i].buffer));
+        inst->rev_comb_l[i].size = REVERB_COMB_L[i];
+        inst->rev_comb_l[i].idx = 0;
+        inst->rev_comb_l[i].filter = 0.0f;
+
+        memset(inst->rev_comb_r[i].buffer, 0, sizeof(inst->rev_comb_r[i].buffer));
+        inst->rev_comb_r[i].size = REVERB_COMB_R[i];
+        inst->rev_comb_r[i].idx = 0;
+        inst->rev_comb_r[i].filter = 0.0f;
+    }
+    for (int i = 0; i < 2; ++i) {
+        memset(inst->rev_ap_l[i].buffer, 0, sizeof(inst->rev_ap_l[i].buffer));
+        inst->rev_ap_l[i].size = REVERB_ALLPASS_L[i];
+        inst->rev_ap_l[i].idx = 0;
+
+        memset(inst->rev_ap_r[i].buffer, 0, sizeof(inst->rev_ap_r[i].buffer));
+        inst->rev_ap_r[i].size = REVERB_ALLPASS_R[i];
+        inst->rev_ap_r[i].idx = 0;
+    }
+}
+
+static void reverb_recompute(chordism_instance_t *inst) {
+    /* Comb feedback maps decay 0..1 → 0.70..0.97 (long tail at top). */
+    float fb = 0.70f + inst->reverb_decay * 0.27f;
+    float dp = inst->reverb_damp * 0.5f;   /* gentle damping range */
+    for (int i = 0; i < 4; ++i) {
+        inst->rev_comb_l[i].feedback = fb;
+        inst->rev_comb_l[i].damp = dp;
+        inst->rev_comb_r[i].feedback = fb;
+        inst->rev_comb_r[i].damp = dp;
+    }
 }
 
 static void vibrato_recompute(chordism_instance_t *inst) {
@@ -569,6 +657,11 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->vibrato_phase = 0.0f;
     inst->vib_ramp_value = 0.0f;
     vibrato_recompute(inst);
+    inst->reverb_mix = 0.0f;          /* dry by default */
+    inst->reverb_decay = 0.5f;
+    inst->reverb_damp = 0.3f;
+    reverb_init(inst);
+    reverb_recompute(inst);
     inst->filter_cutoff = 1.0f;       /* wide open by default */
     inst->filter_resonance = 0.0f;    /* no resonance */
     inst->filter_mode = FILT_LP;
@@ -712,6 +805,14 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                 inst->filter_env_depth = v;
             }
         }
+    } else if (strcmp(key, "reverb_mix") == 0) {
+        inst->reverb_mix = param_from_string(val, inst->reverb_mix);
+    } else if (strcmp(key, "reverb_decay") == 0) {
+        inst->reverb_decay = param_from_string(val, inst->reverb_decay);
+        reverb_recompute(inst);
+    } else if (strcmp(key, "reverb_damp") == 0) {
+        inst->reverb_damp = param_from_string(val, inst->reverb_damp);
+        reverb_recompute(inst);
     }
 }
 
@@ -730,7 +831,8 @@ static const char *ui_hierarchy_json =
         "\"drive\",\"waveform\",\"shape\",\"volume\","
         "{\"level\":\"filter\",\"label\":\"Filter\"},"
         "{\"level\":\"mod\",\"label\":\"Modulation\"},"
-        "{\"level\":\"env\",\"label\":\"Envelope\"}"
+        "{\"level\":\"env\",\"label\":\"Envelope\"},"
+        "{\"level\":\"fx\",\"label\":\"FX\"}"
       "]"
     "},"
     "\"filter\":{"
@@ -752,6 +854,13 @@ static const char *ui_hierarchy_json =
       "\"children\":null,"
       "\"knobs\":[\"attack\",\"release\",\"volume\"],"
       "\"params\":[\"attack\",\"release\",\"volume\"],"
+      "\"navigate_to\":\"root\""
+    "},"
+    "\"fx\":{"
+      "\"name\":\"FX\","
+      "\"children\":null,"
+      "\"knobs\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\"],"
+      "\"params\":[\"reverb_mix\",\"reverb_decay\",\"reverb_damp\"],"
       "\"navigate_to\":\"root\""
     "}"
   "}"
@@ -780,7 +889,10 @@ static const char *chain_params_json =
   "{\"key\":\"vib_speed\",\"name\":\"Vib Spd\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
   "{\"key\":\"vib_delay\",\"name\":\"Vib Dly\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.2},"
   "{\"key\":\"attack\",\"name\":\"Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.05},"
-  "{\"key\":\"release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3}"
+  "{\"key\":\"release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
+  "{\"key\":\"reverb_mix\",\"name\":\"Verb Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
+  "{\"key\":\"reverb_decay\",\"name\":\"Verb Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
+  "{\"key\":\"reverb_damp\",\"name\":\"Verb Damp\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3}"
 "]";
 
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
@@ -843,8 +955,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_decay);
     } else if (key && strcmp(key, "filter_env_depth") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
+    } else if (key && strcmp(key, "reverb_mix") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_mix);
+    } else if (key && strcmp(key, "reverb_decay") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_decay);
+    } else if (key && strcmp(key, "reverb_damp") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->reverb_damp);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.18");
+        return snprintf(buf, buf_len, "0.0.19");
     }
     buf[0] = '\0';
     return 0;
@@ -990,8 +1108,30 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         float dl = tanhf(drive_gain * fl);
         float dr = tanhf(drive_gain * fr);
 
-        float sl = dl * master_gain;
-        float sr = dr * master_gain;
+        /* Reverb: 4 parallel combs summed + 2 series allpass per channel. */
+        float wl = dl, wr = dr;
+        if (inst->reverb_mix > 0.0f) {
+            float rl =
+                comb_process(&inst->rev_comb_l[0], dl) +
+                comb_process(&inst->rev_comb_l[1], dl) +
+                comb_process(&inst->rev_comb_l[2], dl) +
+                comb_process(&inst->rev_comb_l[3], dl);
+            float rr =
+                comb_process(&inst->rev_comb_r[0], dr) +
+                comb_process(&inst->rev_comb_r[1], dr) +
+                comb_process(&inst->rev_comb_r[2], dr) +
+                comb_process(&inst->rev_comb_r[3], dr);
+            rl *= 0.25f;
+            rr *= 0.25f;
+            rl = allpass_process(&inst->rev_ap_l[1], allpass_process(&inst->rev_ap_l[0], rl));
+            rr = allpass_process(&inst->rev_ap_r[1], allpass_process(&inst->rev_ap_r[0], rr));
+
+            wl = dl * (1.0f - inst->reverb_mix) + rl * inst->reverb_mix;
+            wr = dr * (1.0f - inst->reverb_mix) + rr * inst->reverb_mix;
+        }
+
+        float sl = wl * master_gain;
+        float sr = wr * master_gain;
         if (sl > 32767.0f) sl = 32767.0f;
         if (sl < -32768.0f) sl = -32768.0f;
         if (sr > 32767.0f) sr = 32767.0f;
