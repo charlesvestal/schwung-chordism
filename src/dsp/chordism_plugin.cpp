@@ -158,6 +158,13 @@ static const float VIB_SPEED_MAX_HZ = 12.0f;
 static const float VIB_DEPTH_MAX_CENTS = 100.0f;
 static const float VIB_DELAY_MAX_S = 2.0f;
 static const float ONE_OVER_1200 = 1.0f / 1200.0f;
+static const float ONE_OVER_12 = 1.0f / 12.0f;
+
+/* Pitch sweep: ±12 semitones max offset at amount=±1. Rate sets exp decay
+ * time toward 0. */
+static const float SWEEP_MAX_SEMITONES = 12.0f;
+static const float SWEEP_TIME_MIN_S = 0.01f;
+static const float SWEEP_TIME_MAX_S = 4.0f;
 
 /* Filter cutoff range, exp-mapped 0..1 → 20 Hz .. 20 kHz. TPT SVF is stable
  * up to Nyquist but tan() blows up exactly AT Nyquist — keep cutoff under
@@ -241,12 +248,18 @@ struct chordism_instance_t {
     float vib_speed;     /* 0..1 → exp 0.1..12 Hz */
     float vib_depth;     /* 0..1 → 0..VIB_DEPTH_MAX_CENTS */
     float vib_delay;     /* 0..1 → 0..VIB_DELAY_MAX_S rise time */
+    float sweep_amount;  /* -1..+1 → ±12 semitones offset at note-on */
+    float sweep_rate;    /* 0..1 → exp time SWEEP_TIME_MIN_S..MAX_S */
 
     /* Vibrato runtime state — single global LFO + ramp shared by all voices. */
     float vibrato_phase;
     float vibrato_phase_inc;
     float vib_ramp_value;   /* 0..1, climbs after chord_on */
     float vib_ramp_inc;     /* per-sample ramp step (precomputed from vib_delay) */
+
+    /* Pitch sweep runtime state — single offset, decays toward 0. */
+    float sweep_value;        /* current semitones */
+    float sweep_coef;         /* exp decay coef per sample (precomputed) */
     float filter_cutoff;     /* 0..1 → exp 20..20kHz */
     float filter_resonance;  /* 0..1 → Q from FILTER_Q_MIN to FILTER_Q_MAX */
     int   filter_mode;       /* 0..NUM_FILTER_MODES-1 */
@@ -384,6 +397,15 @@ static void vibrato_recompute(chordism_instance_t *inst) {
     float delay_samples = delay_s * SAMPLE_RATE;
     if (delay_samples < 1.0f) delay_samples = 1.0f;
     inst->vib_ramp_inc = 1.0f / delay_samples;
+}
+
+static void sweep_recompute(chordism_instance_t *inst) {
+    /* Time exp-mapped: rate=0 → slow (4s), rate=1 → fast (10ms). */
+    float ratio = SWEEP_TIME_MAX_S / SWEEP_TIME_MIN_S;
+    float time_s = SWEEP_TIME_MAX_S / powf(ratio, inst->sweep_rate);
+    float samples = time_s * SAMPLE_RATE;
+    if (samples < 1.0f) samples = 1.0f;
+    inst->sweep_coef = expf(-5.0f / samples);
 }
 
 /* Exp-map filter cutoff. */
@@ -613,6 +635,9 @@ static void chord_on(chordism_instance_t *inst, int root_note, int velocity) {
 
     /* Re-trigger vibrato delay ramp (phase stays continuous). */
     inst->vib_ramp_value = 0.0f;
+
+    /* Re-trigger pitch sweep: start at full offset. */
+    inst->sweep_value = inst->sweep_amount * SWEEP_MAX_SEMITONES;
 }
 
 static void chord_off(chordism_instance_t *inst, int root_note) {
@@ -657,6 +682,10 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->vibrato_phase = 0.0f;
     inst->vib_ramp_value = 0.0f;
     vibrato_recompute(inst);
+    inst->sweep_amount = 0.0f;
+    inst->sweep_rate = 0.5f;
+    inst->sweep_value = 0.0f;
+    sweep_recompute(inst);
     inst->reverb_mix = 0.0f;          /* dry by default */
     inst->reverb_decay = 0.5f;
     inst->reverb_damp = 0.3f;
@@ -772,6 +801,19 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "vib_delay") == 0) {
         inst->vib_delay = param_from_string(val, inst->vib_delay);
         vibrato_recompute(inst);
+    } else if (strcmp(key, "sweep_amount") == 0) {
+        if (val) {
+            char *end = nullptr;
+            float v = strtof(val, &end);
+            if (end != val) {
+                if (v < -1.0f) v = -1.0f;
+                if (v > 1.0f) v = 1.0f;
+                inst->sweep_amount = v;
+            }
+        }
+    } else if (strcmp(key, "sweep_rate") == 0) {
+        inst->sweep_rate = param_from_string(val, inst->sweep_rate);
+        sweep_recompute(inst);
     } else if (strcmp(key, "filter_cutoff") == 0) {
         inst->filter_cutoff = param_from_string(val, inst->filter_cutoff);
         filter_recompute(inst);
@@ -845,8 +887,8 @@ static const char *ui_hierarchy_json =
     "\"mod\":{"
       "\"name\":\"Modulation\","
       "\"children\":null,"
-      "\"knobs\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"vib_delay\",\"detune\"],"
-      "\"params\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"vib_delay\",\"detune\"],"
+      "\"knobs\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"sweep_amount\",\"sweep_rate\",\"detune\"],"
+      "\"params\":[\"lfo_shape\",\"lfo_rate\",\"lfo_depth\",\"vib_depth\",\"vib_speed\",\"vib_delay\",\"sweep_amount\",\"sweep_rate\",\"detune\"],"
       "\"navigate_to\":\"root\""
     "},"
     "\"env\":{"
@@ -888,6 +930,8 @@ static const char *chain_params_json =
   "{\"key\":\"vib_depth\",\"name\":\"Vib Dpt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
   "{\"key\":\"vib_speed\",\"name\":\"Vib Spd\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
   "{\"key\":\"vib_delay\",\"name\":\"Vib Dly\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.2},"
+  "{\"key\":\"sweep_amount\",\"name\":\"Sweep\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02,\"default\":0},"
+  "{\"key\":\"sweep_rate\",\"name\":\"Swp Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.5},"
   "{\"key\":\"attack\",\"name\":\"Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.05},"
   "{\"key\":\"release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0.3},"
   "{\"key\":\"reverb_mix\",\"name\":\"Verb Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"default\":0},"
@@ -941,6 +985,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%.4f", inst->vib_depth);
     } else if (key && strcmp(key, "vib_delay") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->vib_delay);
+    } else if (key && strcmp(key, "sweep_amount") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->sweep_amount);
+    } else if (key && strcmp(key, "sweep_rate") == 0) {
+        return snprintf(buf, buf_len, "%.4f", inst->sweep_rate);
     } else if (key && strcmp(key, "filter_cutoff") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_cutoff);
     } else if (key && strcmp(key, "filter_resonance") == 0) {
@@ -962,7 +1010,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "reverb_damp") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->reverb_damp);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.19");
+        return snprintf(buf, buf_len, "0.0.20");
     }
     buf[0] = '\0';
     return 0;
@@ -1013,9 +1061,19 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         float vib_cents = sinf(TWO_PI * inst->vibrato_phase)
                           * inst->vib_ramp_value
                           * inst->vib_depth * VIB_DEPTH_MAX_CENTS;
-        float vib_ratio = (vib_cents == 0.0f)
+
+        /* Pitch sweep: exp decay toward 0. */
+        if (inst->sweep_value != 0.0f) {
+            inst->sweep_value *= inst->sweep_coef;
+            if (inst->sweep_value < 1e-4f && inst->sweep_value > -1e-4f) {
+                inst->sweep_value = 0.0f;
+            }
+        }
+
+        float pitch_semis = inst->sweep_value;
+        float vib_ratio = (vib_cents == 0.0f && pitch_semis == 0.0f)
             ? 1.0f
-            : exp2f(vib_cents * ONE_OVER_1200);
+            : exp2f(vib_cents * ONE_OVER_1200 + pitch_semis * ONE_OVER_12);
 
         float l_mix = 0.0f;
         float r_mix = 0.0f;
