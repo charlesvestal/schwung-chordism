@@ -688,7 +688,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "filter_env_depth") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->filter_env_depth);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.0.12");
+        return snprintf(buf, buf_len, "0.0.13");
     }
     buf[0] = '\0';
     return 0;
@@ -794,10 +794,18 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         float filtered = svf_process(&inst->filter, mix, inst->filter_mode,
                                      a1, a2, a3, inst->filter_k);
 
+        /* Resonance compensation: SVF peak gain ≈ Q at the cutoff frequency
+         * (Q ramps 0.5..20 here). Without compensation, modest resonance
+         * pushes the filter output into tanh's saturation region, audibly
+         * "clipping" the synth even at drive=0. Scale by 1/(1+reso*3) so
+         * the filter passband stays near ±1 across the resonance range. */
+        float reso_comp = 1.0f / (1.0f + inst->filter_resonance * 3.0f);
+        float compensated = filtered * reso_comp;
+
         /* Drive — soft-clip via tanh. Gain ramps 1..10. At drive=0,
          * tanh(x) ≈ x for small x, transparent for typical synth levels. */
         float drive_gain = 1.0f + inst->drive * 9.0f;
-        float driven = tanhf(drive_gain * filtered);
+        float driven = tanhf(drive_gain * compensated);
 
         float scaled = driven * master_gain;
         if (scaled > 32767.0f) scaled = 32767.0f;
