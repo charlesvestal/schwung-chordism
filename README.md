@@ -46,7 +46,7 @@ note → tuning (chord type or interval list, scale-quantized)
      → Drive (tanh, bypassed when zero)
      → Lo-Fi (post-filter default)
      → Delay (6 modes)
-     → Reverb (Schroeder)
+     → Reverb (Dattorro plate)
      → output
 ```
 
@@ -62,8 +62,8 @@ Root level + sub-levels. Knobs map to physical encoders. Some params are accessi
 | **Oscillators** | Wave 1..4, Shape 1..4, Chord, Spread, Rotation, Detune, Width, Morph, FM |
 | **Filter** | Cutoff, Reso, Mode (LP/HP/BP), Slope (12/24), Env A/D/Amt, Env Mode, Hard Reset, Filter LFO, Drive |
 | **Modulation** | Shape LFO, Vibrato (depth/speed/delay/stray + per-osc enable), Pitch Sweep, Glide, Detune |
-| **Envelope** | Attack, Release, Volume, VCA Mode, Hard Reset, Drone |
-| **FX** | Reverb (mix/decay/damp/bokeh/lowcut/space/mod) + Lo-Fi (grind/shift/decim) + position toggle |
+| **Envelope** | Attack, Release, Volume, VCA Mode, Amp LFO (tremolo), Hard Reset, Drone |
+| **FX** | Reverb (mix/decay/damp/shimmer/lowcut/size/mod) + Lo-Fi (grind/shift/decim) + position toggle |
 | **Delay** | Mix, Time, Feedback, Tone Hi/Lo, Mode (6), Mod |
 | **Arp** | Enabled, Tempo, Direction, Hold, Euclidean, Clock Sync, Clock Division |
 | **Morph** | Level Morph index/intensity/LFO + Pan Morph index/intensity/LFO |
@@ -150,7 +150,7 @@ VCA env + Filter env each have:
 
 ### Reverb
 
-Schroeder topology: 4 parallel combs + 2 series allpass per channel. Params: Mix, Decay (comb feedback), Damp (HF damping in feedback), Bokeh (allpass diffusion coefficient), Low Cut (one-pole HP on wet output), Space (comb-length scaler), Mod (subtle L/R out-of-phase damp modulation).
+Dattorro plate topology (J. Dattorro, "Effect Design Part 1", AES 1997): input diffusers feeding a modulated figure-eight tank. Params: Mix, Decay (base RT60), Damp (HF damping in the tank), Shimmer (chorus excursion), Low Cut (one-pole HP on wet output), Size (adds tail length), Mod Rate / Mod Depth (chorus LFO speed and extra excursion).
 
 ### Delay
 
@@ -230,7 +230,7 @@ Routings: `ctrl_to_cutoff`, `ctrl_to_morph`, `ctrl_to_vib`, `ctrl_to_shape`, `ct
 - The 4 chord voices use round-robin into 16 voice slots (4 banks of 4) so chord steals don't click — release tails finish before reuse.
 - Filter env amount is bipolar. Negative = closes filter on attack.
 - For glide to feel right, set Tuning = Chord and use a moderate Glide rate (~0.3). With **Glide Legato** on, glide only fires when notes overlap.
-- Reverb Space at the top + Bokeh near max gives the biggest tail.
+- Reverb Size at the top + Decay near max gives the biggest tail; Shimmer/Mod add chorus movement.
 - For pure synthesis without saturation, leave Drive at 0 — the tanh is bypassed.
 - Hold a pad through one MIDI clock period to verify clock-synced arp.
 - The Move display only shows ~4 params at a time per page. Long press to scroll if a knob row has more than fits.
