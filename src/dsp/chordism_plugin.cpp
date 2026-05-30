@@ -600,7 +600,8 @@ struct chordism_instance_t {
      * targets via per-target depth knobs (-1..+1). */
     int   ctrl_source;       /* ControlSource enum */
     int   ctrl_cc;           /* MIDI CC number for CTRL_CC (0..127) */
-    float ctrl_value;        /* current normalized source value (-1..+1 for bipolar, 0..1 for unipolar) */
+    float ctrl_value;        /* smoothed source value used by the DSP (slews to target) */
+    float ctrl_value_target; /* instantaneous source value set by MIDI (aftertouch/CC/etc.) */
     float ctrl_to_cutoff;
     float ctrl_to_morph;
     float ctrl_to_vib;
@@ -1070,6 +1071,7 @@ static void preset_apply(chordism_instance_t *inst, int idx) {
     inst->fenv_mode = p->fenv_mode;
     inst->ctrl_source = p->ctrl_source;
     inst->ctrl_value = 0.0f;
+    inst->ctrl_value_target = 0.0f;
     inst->ctrl_to_cutoff = p->ctrl_to_cutoff;
     inst->ctrl_to_morph = p->ctrl_to_morph;
     inst->ctrl_to_vib = p->ctrl_to_vib;
@@ -1761,6 +1763,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->ctrl_source = CTRL_AFTERTOUCH;
     inst->ctrl_cc = 1;              /* MIDI CC 1 = modulation wheel */
     inst->ctrl_value = 0.0f;
+    inst->ctrl_value_target = 0.0f;
     inst->ctrl_to_cutoff = 0.0f;
     inst->ctrl_to_morph = 0.0f;
     inst->ctrl_to_vib = 0.0f;
@@ -1889,13 +1892,13 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
         /* Update modulation source value for note-triggered sources. */
         switch (inst->ctrl_source) {
             case CTRL_RANDOM:
-                inst->ctrl_value = ((float)(rand() & 0xFFFF) / 32768.0f) - 1.0f;
+                inst->ctrl_value_target = ((float)(rand() & 0xFFFF) / 32768.0f) - 1.0f;
                 break;
             case CTRL_COIN_TOSS:
-                inst->ctrl_value = (rand() & 1) ? 1.0f : -1.0f;
+                inst->ctrl_value_target = (rand() & 1) ? 1.0f : -1.0f;
                 break;
             case CTRL_VELOCITY:
-                inst->ctrl_value = (float)d2 / 127.0f;
+                inst->ctrl_value_target = (float)d2 / 127.0f;
                 break;
             default:
                 break;
@@ -1934,13 +1937,13 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
         /* Polyphonic aftertouch (Move's pads) — d1 = note, d2 = pressure. */
         inst->aftertouch = (float)d2 / 127.0f;
         if (inst->ctrl_source == CTRL_AFTERTOUCH) {
-            inst->ctrl_value = inst->aftertouch;
+            inst->ctrl_value_target = inst->aftertouch;
         }
     } else if (status == 0xD0) {
         /* Channel aftertouch — single-byte pressure in d1. */
         inst->aftertouch = (float)d1 / 127.0f;
         if (inst->ctrl_source == CTRL_AFTERTOUCH) {
-            inst->ctrl_value = inst->aftertouch;
+            inst->ctrl_value_target = inst->aftertouch;
         }
     } else if (status == 0xB0) {
         if (d1 == 123) {
@@ -1949,7 +1952,7 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
             release_all_voices(inst);
         } else if (inst->ctrl_source == CTRL_CC && d1 == inst->ctrl_cc) {
             /* Selected MIDI CC → modulation source. */
-            inst->ctrl_value = (float)d2 / 127.0f;
+            inst->ctrl_value_target = (float)d2 / 127.0f;
         }
     }
 }
@@ -2388,6 +2391,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->ctrl_source = s;
             /* Reset value when source switches. */
             inst->ctrl_value = 0.0f;
+    inst->ctrl_value_target = 0.0f;
         }
     } else if (strcmp(key, "ctrl_cc") == 0) {
         if (val) {
@@ -3008,6 +3012,11 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     }
 
     for (int i = 0; i < frames; ++i) {
+        /* Slew the control-source value toward its target so discrete MIDI
+         * aftertouch/CC steps don't zipper the cutoff (or any ctrl destination).
+         * ~5 ms one-pole: immediate to play, smooth enough to remove the steps. */
+        inst->ctrl_value += (inst->ctrl_value_target - inst->ctrl_value) * 0.005f;
+
         /* Arp tick (internal clock). MIDI-clock-synced ticks are fired from
          * on_midi when 0xF8 ticks arrive. */
         if (inst->arp_enabled && !inst->arp_clock_sync && inst->held_count > 0) {
@@ -3228,7 +3237,10 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         bool env_on = inst->filter_env_depth != 0.0f;
         bool lfo_on = inst->filter_lfo_depth != 0.0f;
         bool ctrl_on = inst->ctrl_to_cutoff != 0.0f;
-        bool at_on = inst->aftertouch > 0.0f;
+        /* Keep recomputing while pressure is held OR the smoothed control value
+         * is still settling toward its target (so the slew completes cleanly). */
+        bool at_on = inst->aftertouch > 0.0f ||
+                     fabsf(inst->ctrl_value - inst->ctrl_value_target) > 1e-4f;
 
         if (env_on || lfo_on || ctrl_on || at_on) {
             float env_val = env_on ? aenv_tick(inst, &inst->filter_env) : 0.0f;
@@ -3255,7 +3267,13 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             }
 
             float ctrl_mod = inst->ctrl_value * inst->ctrl_to_cutoff * 0.5f;
-            float at_mod = inst->aftertouch * 0.4f;  /* press harder = filter opens */
+            /* Default "press harder = brighter": only when the source is
+             * aftertouch and the preset doesn't already route it to cutoff
+             * (avoids double-opening), and via the SMOOTHED ctrl_value so it
+             * doesn't zipper on coarse MIDI aftertouch steps. */
+            float at_mod = (inst->ctrl_source == CTRL_AFTERTOUCH &&
+                            inst->ctrl_to_cutoff == 0.0f)
+                         ? inst->ctrl_value * 0.4f : 0.0f;
             eff_l = inst->filter_cutoff + env_mod + lfo_l_mod + ctrl_mod + at_mod;
             eff_r = inst->filter_cutoff + env_mod + lfo_r_mod + ctrl_mod + at_mod;
             if (eff_l < 0.0f) eff_l = 0.0f; if (eff_l > 1.0f) eff_l = 1.0f;
