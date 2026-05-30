@@ -440,6 +440,9 @@ struct SVF {
     float ic2eq;
 };
 
+/* Warm ZDF ladder state (4 integrators) — see ladder_lp_process below. */
+typedef struct { float s[4]; } LadderLP;
+
 enum FilterMode { FILT_LP = 0, FILT_HP = 1, FILT_BP = 2 };
 static const int NUM_FILTER_MODES = 3;
 
@@ -686,6 +689,8 @@ struct chordism_instance_t {
      * For 12 dB mode the b-stages are inert. */
     SVF   filter_l_b;
     SVF   filter_r_b;
+    LadderLP ladder_l;   /* warm ZDF ladder, used for the LP filter mode */
+    LadderLP ladder_r;
     /* Static (no-modulation) TPT SVF coefficients. Per-sample recompute kicks
      * in when filter_env_depth != 0 OR filter_lfo_depth != 0. */
     float filter_a1;
@@ -1208,6 +1213,35 @@ static inline float svf_process(SVF *s, float input, int mode,
         case FILT_LP:
         default:      return v2;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Warm 4-pole lowpass ladder — zero-delay (ZDF/TPT) algebraic feedback solve,
+ * tanh input drive + soft output for analog character. Stable and resonance is
+ * cutoff-independent (the algebraic solve removes the unit-delay that makes
+ * naive ladders ring/blow up at high cutoff). Standard published technique
+ * (Zavalishin); coefficients are our own. Used for the LP filter mode; BP/HP
+ * stay on the clean SVF. Self-oscillates musically at max resonance, bounded
+ * by the output saturator so it never runs away. */
+static inline float ladder_lp_process(LadderLP *L, float in, float hz,
+                                      float res, float drive) {
+    float g = tanf(3.14159265358979f * hz / SAMPLE_RATE);
+    if (g > 10.0f) g = 10.0f;
+    float G = g / (1.0f + g);
+    float G2 = G * G, G4 = G2 * G2;
+    float k = res * 3.8f;                         /* -> self-oscillation near res=1 */
+    float x = (drive > 0.0f) ? tanhf(in * (1.0f + drive * 3.0f)) : in;
+    /* zero-delay feedback: u = (x - k*S) / (1 + k*G^4) */
+    float S = G2 * G * (1.0f - G) * L->s[0] + G2 * (1.0f - G) * L->s[1]
+            + G * (1.0f - G) * L->s[2] + (1.0f - G) * L->s[3];
+    float u = (x - k * S) / (1.0f + k * G4);
+    float y0 = G * (u  - L->s[0]) + L->s[0]; L->s[0] = 2.0f * y0 - L->s[0];
+    float y1 = G * (y0 - L->s[1]) + L->s[1]; L->s[1] = 2.0f * y1 - L->s[1];
+    float y2 = G * (y1 - L->s[2]) + L->s[2]; L->s[2] = 2.0f * y2 - L->s[2];
+    float y3 = G * (y2 - L->s[3]) + L->s[3]; L->s[3] = 2.0f * y3 - L->s[3];
+    float out = tanhf(y3 * (1.6f + res * 1.2f)); /* soft output: warmth + spike tame */
+    if (!isfinite(out)) { L->s[0]=L->s[1]=L->s[2]=L->s[3]=0.0f; out = 0.0f; }
+    return out;
 }
 
 /* Reflective wavefolder — folds input back across [-1, +1] (Buchla style). */
@@ -3174,16 +3208,12 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             apply_lofi(inst, &l_mix, &r_mix);
         }
 
-        /* Filter coefficients: per-channel recompute when filter env or LFO is
-         * active (the LFO supports L/R spread → independent coefs).
-         * Otherwise reuse precomputed static coefs for both channels. */
-        float al1 = inst->filter_a1, al2 = inst->filter_a2, al3 = inst->filter_a3;
-        float ar1 = al1, ar2 = al2, ar3 = al3;
+        /* Effective (modulated) cutoff per channel: base + filter env + filter
+         * LFO (with L/R spread) + control source + aftertouch. */
+        float eff_l = inst->filter_cutoff, eff_r = inst->filter_cutoff;
         bool env_on = inst->filter_env_depth != 0.0f;
         bool lfo_on = inst->filter_lfo_depth != 0.0f;
         bool ctrl_on = inst->ctrl_to_cutoff != 0.0f;
-        /* Aftertouch is hardcoded to open the filter — always recompute coefs
-         * when the user is pressing pads. */
         bool at_on = inst->aftertouch > 0.0f;
 
         if (env_on || lfo_on || ctrl_on || at_on) {
@@ -3212,52 +3242,50 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             float ctrl_mod = inst->ctrl_value * inst->ctrl_to_cutoff * 0.5f;
             float at_mod = inst->aftertouch * 0.4f;  /* press harder = filter opens */
-            float eff_l = inst->filter_cutoff + env_mod + lfo_l_mod + ctrl_mod + at_mod;
-            float eff_r = inst->filter_cutoff + env_mod + lfo_r_mod + ctrl_mod + at_mod;
+            eff_l = inst->filter_cutoff + env_mod + lfo_l_mod + ctrl_mod + at_mod;
+            eff_r = inst->filter_cutoff + env_mod + lfo_r_mod + ctrl_mod + at_mod;
             if (eff_l < 0.0f) eff_l = 0.0f; if (eff_l > 1.0f) eff_l = 1.0f;
             if (eff_r < 0.0f) eff_r = 0.0f; if (eff_r > 1.0f) eff_r = 1.0f;
+        }
 
-            float max_hz = SAMPLE_RATE * 0.49f;
+        float max_hz = SAMPLE_RATE * 0.49f;
+        float hz_l = filter_cutoff_to_hz(eff_l);
+        if (hz_l > max_hz) hz_l = max_hz; if (hz_l < 1.0f) hz_l = 1.0f;
+        float hz_r = filter_cutoff_to_hz(eff_r);
+        if (hz_r > max_hz) hz_r = max_hz; if (hz_r < 1.0f) hz_r = 1.0f;
 
-            float hz_l = filter_cutoff_to_hz(eff_l);
-            if (hz_l > max_hz) hz_l = max_hz; if (hz_l < 1.0f) hz_l = 1.0f;
+        float fl, fr;
+        bool lp_mode = (inst->filter_mode == FILT_LP);
+        if (lp_mode) {
+            /* Warm ZDF ladder for lowpass — drive is folded into the ladder. */
+            fl = ladder_lp_process(&inst->ladder_l, l_mix, hz_l,
+                                   inst->filter_resonance, inst->drive);
+            fr = ladder_lp_process(&inst->ladder_r, r_mix, hz_r,
+                                   inst->filter_resonance, inst->drive);
+        } else {
+            /* Clean SVF for band-pass / high-pass. */
             float g_l = tanf(3.14159265358979f * hz_l / SAMPLE_RATE);
-            al1 = 1.0f / (1.0f + g_l * (g_l + inst->filter_k));
-            al2 = g_l * al1;
-            al3 = g_l * al2;
-
-            float hz_r = filter_cutoff_to_hz(eff_r);
-            if (hz_r > max_hz) hz_r = max_hz; if (hz_r < 1.0f) hz_r = 1.0f;
+            float al1 = 1.0f / (1.0f + g_l * (g_l + inst->filter_k));
+            float al2 = g_l * al1, al3 = g_l * al2;
             float g_r = tanf(3.14159265358979f * hz_r / SAMPLE_RATE);
-            ar1 = 1.0f / (1.0f + g_r * (g_r + inst->filter_k));
-            ar2 = g_r * ar1;
-            ar3 = g_r * ar2;
+            float ar1 = 1.0f / (1.0f + g_r * (g_r + inst->filter_k));
+            float ar2 = g_r * ar1, ar3 = g_r * ar2;
+            fl = svf_process(&inst->filter_l, l_mix, inst->filter_mode, al1, al2, al3, inst->filter_k);
+            fr = svf_process(&inst->filter_r, r_mix, inst->filter_mode, ar1, ar2, ar3, inst->filter_k);
+            if (inst->filter_slope == 1) {
+                fl = svf_process(&inst->filter_l_b, fl, inst->filter_mode, al1, al2, al3, inst->filter_k);
+                fr = svf_process(&inst->filter_r_b, fr, inst->filter_mode, ar1, ar2, ar3, inst->filter_k);
+            }
+            float reso_factor = (inst->filter_slope == 1) ? 7.0f : 4.0f;
+            float reso_comp = 1.0f / (1.0f + inst->filter_resonance * reso_factor);
+            fl *= reso_comp;
+            fr *= reso_comp;
         }
 
-        /* 12 dB: single SVF pass per channel. 24 dB: cascade two passes. */
-        float fl = svf_process(&inst->filter_l, l_mix, inst->filter_mode,
-                               al1, al2, al3, inst->filter_k);
-        float fr = svf_process(&inst->filter_r, r_mix, inst->filter_mode,
-                               ar1, ar2, ar3, inst->filter_k);
-        if (inst->filter_slope == 1) {
-            fl = svf_process(&inst->filter_l_b, fl, inst->filter_mode,
-                             al1, al2, al3, inst->filter_k);
-            fr = svf_process(&inst->filter_r_b, fr, inst->filter_mode,
-                             ar1, ar2, ar3, inst->filter_k);
-        }
-
-        /* Resonance compensation — peak gain through SVF ≈ Q (squared for 24
-         * dB cascade), so scale output down at high Q. Stronger for 24 dB. */
-        float reso_factor = (inst->filter_slope == 1) ? 7.0f : 4.0f;
-        float reso_comp = 1.0f / (1.0f + inst->filter_resonance * reso_factor);
-        fl *= reso_comp;
-        fr *= reso_comp;
-
-        /* Drive: tanh only when actively used. At drive=0 the path is fully
-         * transparent (no soft-clipping). The int16 conversion at the end
-         * still clips hard if the signal exceeds ±32767. */
+        /* Drive: the ladder (LP) already saturates internally; apply the post
+         * soft-clip drive only for the SVF (BP/HP) path. */
         float dl, dr;
-        if (inst->drive > 0.0f) {
+        if (!lp_mode && inst->drive > 0.0f) {
             float drive_gain = 1.0f + inst->drive * 9.0f;
             dl = tanhf(drive_gain * fl);
             dr = tanhf(drive_gain * fr);
