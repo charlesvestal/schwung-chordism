@@ -457,6 +457,18 @@ struct SVF {
 /* Warm ZDF ladder state (4 integrators) — see ladder_lp_process below. */
 typedef struct { float s[4]; } LadderLP;
 
+/* Dattorro plate reverb state (J. Dattorro, AES 1997 — public structure/taps).
+ * Input diffusion (4 allpasses) -> cross-coupled figure-8 tank (modulated
+ * allpass + delay + damping + allpass + delay per half). Lush and long. */
+typedef struct {
+    float d142[142], d107[107], d379[379], d277[277];      /* input diffusers */
+    float apa[692], dla[4453], apb[928], dlb[4217];        /* tank stage 1 */
+    float ap2a[1800], dl2a[3720], ap2b[2656], dl2b[3163];  /* tank stage 2 */
+    int   i142, i107, i379, i277;
+    int   iapa, idla, iapb, idlb, iap2a, idl2a, iap2b, idl2b;
+    float bw, damp_a, damp_b, lphase;
+} DattorroReverb;
+
 enum FilterMode { FILT_LP = 0, FILT_HP = 1, FILT_BP = 2 };
 static const int NUM_FILTER_MODES = 3;
 
@@ -741,6 +753,7 @@ struct chordism_instance_t {
     CombFilter rev_comb_r[4];
     AllpassFilter rev_ap_l[2];
     AllpassFilter rev_ap_r[2];
+    DattorroReverb dattorro;   /* lush plate reverb (active reverb path) */
 
     /* Delay */
     float delay_mix;
@@ -930,6 +943,7 @@ static inline void apply_lofi(chordism_instance_t *inst, float *l, float *r) {
 }
 
 static void reverb_init(chordism_instance_t *inst) {
+    memset(&inst->dattorro, 0, sizeof(inst->dattorro));  /* clear plate tail */
     for (int i = 0; i < 4; ++i) {
         memset(inst->rev_comb_l[i].buffer, 0, sizeof(inst->rev_comb_l[i].buffer));
         inst->rev_comb_l[i].size = REVERB_COMB_L[i];
@@ -1258,6 +1272,72 @@ static inline float ladder_lp_process(LadderLP *L, float in, float hz,
     float out = tanhf(y3 * (1.6f + res * 1.2f)); /* soft output: warmth + spike tame */
     if (!isfinite(out)) { L->s[0]=L->s[1]=L->s[2]=L->s[3]=0.0f; out = 0.0f; }
     return out;
+}
+
+/* --- Dattorro plate reverb helpers --- */
+static inline float drev_ap(float *buf, int len, int *idx, float in, float c) {
+    float d = buf[*idx];
+    float v = in - c * d;
+    float out = d + c * v;
+    buf[*idx] = v; *idx = (*idx + 1) % len;
+    return out;
+}
+static inline float drev_dl_read(float *buf, int len, int idx, int back) {
+    int i = idx - back; while (i < 0) i += len; return buf[i % len];
+}
+/* Modulated allpass (buffer sized baselen+20 for the excursion). */
+static inline float drev_modap(float *buf, int baselen, int *idx, float in, float c, float exc) {
+    int span = baselen + 20;
+    float pos = exc; int bk = baselen + (int)pos;
+    int i = *idx - bk; while (i < 0) i += span;
+    float frac = pos - (float)(int)pos;
+    float a = buf[i % span], b = buf[(i + 1) % span];
+    float d = a + (b - a) * frac;
+    float v = in - c * d;
+    float out = d + c * v;
+    buf[*idx] = v; *idx = (*idx + 1) % span;
+    return out;
+}
+
+/* Process one stereo sample of the plate. decay 0..~0.9 (RT60), damp 0..1
+ * (HF damping), modd = chorus excursion (samples). Returns the wet signal. */
+static void dattorro_process(DattorroReverb *R, float in, float decay,
+                             float damp, float modd, float *wetL, float *wetR) {
+    R->bw += 0.5f * (in - R->bw);
+    float x = R->bw;
+    x = drev_ap(R->d142, 142, &R->i142, x, 0.75f);
+    x = drev_ap(R->d107, 107, &R->i107, x, 0.75f);
+    x = drev_ap(R->d379, 379, &R->i379, x, 0.625f);
+    x = drev_ap(R->d277, 277, &R->i277, x, 0.625f);
+
+    R->lphase += 0.0006f; if (R->lphase >= 1.0f) R->lphase -= 1.0f;
+    float exc = (0.5f + 0.5f * sinf(6.2831853f * R->lphase)) * modd;
+    float lastA = drev_dl_read(R->dl2a, 3720, R->idl2a, 0);
+    float lastB = drev_dl_read(R->dl2b, 3163, R->idl2b, 0);
+
+    /* left half */
+    float la = x + decay * lastB;
+    la = drev_modap(R->apa, 672, &R->iapa, la, 0.7f, exc);
+    R->dla[R->idla] = la; float ta = R->dla[R->idla]; R->idla = (R->idla + 1) % 4453;
+    R->damp_a += (1.0f - damp) * (ta - R->damp_a); ta = R->damp_a;
+    ta = drev_ap(R->ap2a, 1800, &R->iap2a, ta, 0.5f);
+    R->dl2a[R->idl2a] = ta * decay; R->idl2a = (R->idl2a + 1) % 3720;
+
+    /* right half */
+    float rb = x + decay * lastA;
+    rb = drev_modap(R->apb, 908, &R->iapb, rb, 0.7f, exc);
+    R->dlb[R->idlb] = rb; float tb = R->dlb[R->idlb]; R->idlb = (R->idlb + 1) % 4217;
+    R->damp_b += (1.0f - damp) * (tb - R->damp_b); tb = R->damp_b;
+    tb = drev_ap(R->ap2b, 2656, &R->iap2b, tb, 0.5f);
+    R->dl2b[R->idl2b] = tb * decay; R->idl2b = (R->idl2b + 1) % 3163;
+
+    /* output taps from the opposite half (Dattorro-style stereo spread) */
+    float l = drev_dl_read(R->dlb, 4217, R->idlb, 266) + drev_dl_read(R->dlb, 4217, R->idlb, 2974)
+            - drev_dl_read(R->ap2b, 2656, R->iap2b, 1913) + drev_dl_read(R->dl2b, 3163, R->idl2b, 1996);
+    float r = drev_dl_read(R->dla, 4453, R->idla, 353) + drev_dl_read(R->dla, 4453, R->idla, 3627)
+            - drev_dl_read(R->ap2a, 1800, R->iap2a, 1228) + drev_dl_read(R->dl2a, 3720, R->idl2a, 2673);
+    *wetL = 0.6f * l;
+    *wetR = 0.6f * r;
 }
 
 /* Reflective wavefolder — folds input back across [-1, +1] (Buchla style). */
@@ -3426,27 +3506,15 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             dr = dr * (1.0f - mix) + out_r * mix;
         }
 
-        /* Reverb: 4 parallel combs summed + 2 series allpass per channel.
-         * Bokeh controls allpass diffusion. Low cut HPs the reverb output. */
+        /* Reverb: lush Dattorro plate. decay -> RT60, damp -> HF darkening,
+         * bokeh -> chorus modulation depth. Low cut HPs the wet output. */
         float wl = dl, wr = dr;
         if (inst->reverb_mix > 0.0f) {
-            float rl =
-                comb_process(&inst->rev_comb_l[0], dl) +
-                comb_process(&inst->rev_comb_l[1], dl) +
-                comb_process(&inst->rev_comb_l[2], dl) +
-                comb_process(&inst->rev_comb_l[3], dl);
-            float rr =
-                comb_process(&inst->rev_comb_r[0], dr) +
-                comb_process(&inst->rev_comb_r[1], dr) +
-                comb_process(&inst->rev_comb_r[2], dr) +
-                comb_process(&inst->rev_comb_r[3], dr);
-            rl *= 0.25f;
-            rr *= 0.25f;
-            float ap_coef = 0.30f + inst->reverb_bokeh * 0.40f;  /* 0.30..0.70 */
-            rl = allpass_process(&inst->rev_ap_l[1],
-                 allpass_process(&inst->rev_ap_l[0], rl, ap_coef), ap_coef);
-            rr = allpass_process(&inst->rev_ap_r[1],
-                 allpass_process(&inst->rev_ap_r[0], rr, ap_coef), ap_coef);
+            float decay = 0.50f + inst->reverb_decay * 0.35f;  /* RT60 ~1s..4s */
+            float damp  = inst->reverb_damp;
+            float modd  = 4.0f + inst->reverb_bokeh * 12.0f;
+            float rl, rr;
+            dattorro_process(&inst->dattorro, (dl + dr) * 0.5f, decay, damp, modd, &rl, &rr);
 
             /* Low cut: one-pole HP on reverb output. coef 1 = no cut,
              * coef → 0 = heavier cut. */
