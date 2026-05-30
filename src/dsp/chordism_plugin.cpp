@@ -153,9 +153,19 @@ static const int CHORD_TABLE[NUM_CHORDS][CHORD_SIZE] = {
 /* Attack range: 1 ms .. 4 s, linear ramp.
  * Release range: 5 ms .. 4 s, exponential decay (asymptotic). */
 static const float ATTACK_MIN_S = 0.001f;
-static const float ATTACK_MAX_S = 4.0f;
-static const float RELEASE_MIN_S = 0.005f;
-static const float RELEASE_MAX_S = 4.0f;
+static const float ATTACK_MAX_S = 16.0f;
+static const float RELEASE_MIN_S = 0.001f;
+static const float RELEASE_MAX_S = 16.0f;
+
+/* Exponential (perceptual) time mapping for envelope stages: a knob from 0..1
+ * maps geometrically across [min,max], so most of the travel sits in the short
+ * end where the ear is sensitive and the very top reaches long pad times. This
+ * replaces the old linear lerp, which made every mid setting feel the same. */
+static inline float env_time_exp(float v01, float min_s, float max_s) {
+    if (v01 <= 0.0f) return min_s;
+    if (v01 >= 1.0f) return max_s;
+    return min_s * powf(max_s / min_s, v01);
+}
 
 /* Silence threshold below which the envelope clamps to 0 and the voice idles. */
 static const float ENV_SILENCE = 1e-4f;
@@ -461,9 +471,10 @@ static const int NUM_CONTROL_SOURCES = 5;
 enum LFOShape { LFO_TRIANGLE = 0, LFO_RAMP_UP = 1, LFO_RAMP_DOWN = 2, LFO_SQUARE = 3 };
 static const int NUM_LFO_SHAPES = 4;
 
-/* LFO rate range, exp-mapped: 0.01 Hz (very slow swell) to 10 Hz (vibrato-ish). */
-static const float LFO_RATE_MIN_HZ = 0.01f;
-static const float LFO_RATE_MAX_HZ = 10.0f;
+/* LFO rate range, exp-mapped: 0.02 Hz (very slow swell) up to 50 Hz (fast,
+ * near-audio-rate shimmer). Wider than the old 0.01..10 for more expressive reach. */
+static const float LFO_RATE_MIN_HZ = 0.02f;
+static const float LFO_RATE_MAX_HZ = 50.0f;
 
 struct LFO {
     float phase;      /* 0..1 */
@@ -1291,8 +1302,8 @@ static float osc_sample(int waveform, float phase, float phase_inc, float shape)
 }
 
 static void aenv_recompute_rates(ADEnv *env, float attack01, float decay01) {
-    float attack_s = lerp01(attack01, ATTACK_MIN_S, ATTACK_MAX_S);
-    float decay_s = lerp01(decay01, RELEASE_MIN_S, RELEASE_MAX_S);
+    float attack_s = env_time_exp(attack01, ATTACK_MIN_S, ATTACK_MAX_S);
+    float decay_s = env_time_exp(decay01, RELEASE_MIN_S, RELEASE_MAX_S);
 
     float attack_samples = attack_s * SAMPLE_RATE;
     if (attack_samples < 1.0f) attack_samples = 1.0f;
@@ -1339,8 +1350,8 @@ static inline float aenv_tick(chordism_instance_t *inst, ADEnv *env) {
 }
 
 static void env_recompute_rates(AREnv *env, float attack01, float release01) {
-    float attack_s = lerp01(attack01, ATTACK_MIN_S, ATTACK_MAX_S);
-    float release_s = lerp01(release01, RELEASE_MIN_S, RELEASE_MAX_S);
+    float attack_s = env_time_exp(attack01, ATTACK_MIN_S, ATTACK_MAX_S);
+    float release_s = env_time_exp(release01, RELEASE_MIN_S, RELEASE_MAX_S);
 
     float attack_samples = attack_s * SAMPLE_RATE;
     if (attack_samples < 1.0f) attack_samples = 1.0f;
