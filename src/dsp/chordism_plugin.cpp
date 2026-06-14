@@ -45,7 +45,14 @@ typedef struct plugin_api_v2 {
 
 static const host_api_v1_t *g_host = nullptr;
 
-static const float SAMPLE_RATE = 44100.0f;
+/* Runtime sample rate. Defaults to 44100 (the Move host rate). The host's
+ * actual rate, if provided via host_api_v1.sample_rate, is applied in
+ * v2_create_instance before any rate-derived state is computed — so AUv3 /
+ * standalone hosts running at 48k get native-rate tuning with no resampling.
+ * All rate-derived values (LFO/vibrato increments, envelope times, filter
+ * coefficients) are computed at function scope from this, so updating it
+ * before instance creation is sufficient; there are no precomputed SR tables. */
+static float SAMPLE_RATE = 44100.0f;
 static const float TWO_PI = 6.28318530717958647692f;
 
 static const int   CHORD_SIZE = 4;
@@ -1681,6 +1688,12 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     if (!inst) return nullptr;
     if (module_dir) {
         strncpy(inst->module_dir, module_dir, sizeof(inst->module_dir) - 1);
+    }
+
+    /* Adopt the host's sample rate before any rate-derived state is computed
+     * below. Bounds-checked so a missing/garbage value falls back to 44100. */
+    if (g_host && g_host->sample_rate >= 8000 && g_host->sample_rate <= 384000) {
+        SAMPLE_RATE = (float)g_host->sample_rate;
     }
 
     inst->attack = 0.05f;
