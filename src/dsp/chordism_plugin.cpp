@@ -2041,9 +2041,163 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * State serialization
+ *
+ * The host persists a chain slot by calling get_param("state") and
+ * restores it with set_param("state", <json>).  Without these the slot
+ * reloads with constructor defaults — i.e. the init patch (2026-08).
+ *
+ * Both directions route through the existing per-key set_param /
+ * get_param dispatch so the two can't drift apart: the table below is
+ * the single list of what persists.  Every key here is handled by both
+ * functions; the "waveform"/"shape" compat aliases are deliberately
+ * excluded (they fan out to the per-osc keys, which we save instead).
+ *
+ * Order matters on restore: "preset" comes first so per-param values
+ * override the preset it applies, and arp_euclid_steps precedes
+ * arp_euclid_beats because the beats setter clamps against steps.
+ * ------------------------------------------------------------------ */
+static const char *STATE_KEYS[] = {
+    "preset",
+    /* Oscillators / chord */
+    "wave_1", "wave_2", "wave_3", "wave_4",
+    "shape_1", "shape_2", "shape_3", "shape_4",
+    "mix_1", "mix_2", "mix_3", "mix_4",
+    "chord_type", "chord_spread", "chord_rotation", "detune", "width",
+    "fm_modulator", "fm_amount", "fm_position",
+    "fm_amount_1", "fm_amount_2", "fm_amount_3", "fm_amount_4",
+    "vib_osc_enable", "sweep_osc_enable",
+    /* Filter */
+    "filter_cutoff", "filter_resonance", "filter_mode", "filter_slope", "drive",
+    "filter_env_attack", "filter_env_decay", "filter_env_depth",
+    "fenv_mode", "fenv_hard_reset",
+    "filter_lfo_rate", "filter_lfo_depth", "filter_lfo_spread",
+    "filter_lfo_shape", "filter_lfo_mode",
+    /* Amp */
+    "attack", "release", "volume", "vca_mode", "vca_hard_reset", "vca_drone",
+    "amp_lfo_rate", "amp_lfo_depth", "amp_lfo_shape",
+    /* Modulation */
+    "lfo_rate", "lfo_depth", "lfo_shape", "shape_lfo_mode",
+    "lfo_phase_1", "lfo_phase_2", "lfo_phase_3", "lfo_phase_4",
+    "vib_speed", "vib_depth", "vib_delay", "vib_stray",
+    "sweep_amount", "sweep_rate",
+    "glide_rate", "glide_legato",
+    "morph_index", "morph_intensity",
+    "lm_lfo_rate", "lm_lfo_depth", "lm_lfo_shape", "lm_lfo_mode",
+    "pan_morph_index", "pan_morph_intensity",
+    "pm_lfo_rate", "pm_lfo_depth", "pm_lfo_shape", "pm_lfo_mode",
+    /* Reverb / degrade */
+    "reverb_mix", "reverb_decay", "reverb_damp", "reverb_shimmer",
+    "reverb_lowcut", "reverb_size", "reverb_mod_rate", "reverb_mod_depth",
+    "grind", "bit_shift", "decimator", "quality_position",
+    /* Delay */
+    "delay_mix", "delay_time", "delay_feedback", "delay_tone",
+    "delay_tone_hi", "delay_tone_lo", "delay_mode",
+    "delay_mod_rate", "delay_mod_depth",
+    /* Arp */
+    "arp_enabled", "arp_tempo", "arp_direction", "arp_hold",
+    "arp_euclid_steps", "arp_euclid_beats",
+    "arp_variation_interval", "arp_variations",
+    "arp_clock_sync", "arp_clock_division",
+    /* Scale / tuning */
+    "scale_index", "scale_root", "tuning_mode",
+    "interval_1", "interval_2", "interval_3",
+    /* Chord map */
+    "chord_pc_0", "chord_pc_1", "chord_pc_2", "chord_pc_3",
+    "chord_pc_4", "chord_pc_5", "chord_pc_6", "chord_pc_7",
+    "chord_pc_8", "chord_pc_9", "chord_pc_10", "chord_pc_11",
+    /* Control routing */
+    "ctrl_source", "ctrl_cc", "ctrl_to_cutoff", "ctrl_to_morph",
+    "ctrl_to_vib", "ctrl_to_shape", "ctrl_to_fm",
+};
+static const int NUM_STATE_KEYS = (int)(sizeof(STATE_KEYS) / sizeof(STATE_KEYS[0]));
+
+/* Extract a scalar value for `key` from a flat JSON object into `out`.
+ * Matching includes both quotes, so "lfo_rate" does not match
+ * "filter_lfo_rate". Returns 1 on success, 0 if the key is absent. */
+static int state_json_get(const char *json, const char *key, char *out, int out_len) {
+    if (!json || !key || !out || out_len <= 0) return 0;
+
+    char needle[64];
+    int n = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (n <= 0 || n >= (int)sizeof(needle)) return 0;
+
+    const char *p = strstr(json, needle);
+    if (!p) return 0;
+    p += n;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != ':') return 0;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+
+    int quoted = (*p == '"');
+    if (quoted) p++;
+
+    int i = 0;
+    while (*p && i < out_len - 1) {
+        if (quoted) {
+            if (*p == '"') break;
+        } else if (*p == ',' || *p == '}' || *p == ' ' ||
+                   *p == '\n' || *p == '\r' || *p == '\t') {
+            break;
+        }
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+static void v2_set_param(void *instance, const char *key, const char *val);
+static int v2_get_param(void *instance, const char *key, char *buf, int buf_len);
+
+static void state_restore(void *instance, const char *json) {
+    if (!instance || !json) return;
+    char val[64];
+    for (int i = 0; i < NUM_STATE_KEYS; ++i) {
+        if (state_json_get(json, STATE_KEYS[i], val, sizeof(val))) {
+            v2_set_param(instance, STATE_KEYS[i], val);
+        }
+    }
+}
+
+/* Emit every persistable param as a flat JSON object. Values come back
+ * from get_param already formatted as JSON-legal numbers. */
+static int state_serialize(void *instance, char *buf, int buf_len) {
+    if (!instance || !buf || buf_len < 3) return 0;
+
+    int offset = 0;
+    buf[offset++] = '{';
+
+    char val[64];
+    for (int i = 0; i < NUM_STATE_KEYS; ++i) {
+        int len = v2_get_param(instance, STATE_KEYS[i], val, sizeof(val));
+        if (len <= 0) continue;  /* Unknown key — skip rather than emit junk */
+
+        /* "key":value plus a leading comma and the closing brace. */
+        int need = (int)strlen(STATE_KEYS[i]) + (int)strlen(val) + 5;
+        if (offset + need >= buf_len) break;
+
+        if (offset > 1) buf[offset++] = ',';
+        offset += snprintf(buf + offset, buf_len - offset,
+                           "\"%s\":%s", STATE_KEYS[i], val);
+    }
+
+    if (offset + 2 > buf_len) return 0;
+    buf[offset++] = '}';
+    buf[offset] = '\0';
+    return offset;
+}
+
 static void v2_set_param(void *instance, const char *key, const char *val) {
     if (!instance || !key) return;
     auto *inst = (chordism_instance_t*)instance;
+
+    /* State restore from slot autosave / patch load. */
+    if (strcmp(key, "state") == 0) {
+        state_restore(instance, val);
+        return;
+    }
 
     if (strcmp(key, "preset") == 0) {
         if (val) {
@@ -2782,6 +2936,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%s", PRESETS[idx].name);
     }
 
+    /* Full state for slot autosave / patch save. */
+    if (key && strcmp(key, "state") == 0) {
+        return state_serialize(instance, buf, buf_len);
+    }
+
     /* Metadata queries from the Shadow UI. */
     if (key && strcmp(key, "ui_hierarchy") == 0) {
         int len = (int)strlen(ui_hierarchy_json);
@@ -3024,7 +3183,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     } else if (key && strcmp(key, "ctrl_to_fm") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->ctrl_to_fm);
     } else if (key && strcmp(key, "version") == 0) {
-        return snprintf(buf, buf_len, "0.3.11");
+        return snprintf(buf, buf_len, "0.3.12");
     }
     buf[0] = '\0';
     return 0;
