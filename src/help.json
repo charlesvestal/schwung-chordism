@@ -128,10 +128,16 @@
         "",
         "Cutoff, Reso.",
         "",
-        "Aftertouch always",
-        "opens the cutoff",
-        "by up to +0.4.",
-        "Press harder.",
+        "With Ctrl Src on",
+        "Aftertouch and",
+        "its to Cutoff",
+        "amount at 0 (the",
+        "default), press",
+        "opens cutoff by",
+        "up to +0.4. Set",
+        "a to Cutoff",
+        "amount and that",
+        "replaces it.",
         "",
         "Filter Env: AD,",
         "ASR, or Looping",
@@ -165,11 +171,7 @@
         "Both have their",
         "own LFO (rate,",
         "depth, shape)",
-        "for animation.",
-        "",
-        "LFO modes: Free,",
-        "Note Reset,",
-        "One Shot."
+        "for animation."
       ]
     },
     {
@@ -319,16 +321,21 @@
         "Each routing is",
         "bipolar (-1..+1).",
         "",
-        "Aftertouch is",
-        "ALSO hardcoded",
-        "to filter cutoff",
-        "always."
+        "If the source is",
+        "Aftertouch and",
+        "to Cutoff is 0,",
+        "a default press",
+        "-to-cutoff of",
+        "+0.4 is added.",
+        "Any non-zero to",
+        "Cutoff replaces",
+        "it."
       ]
     },
     {
       "title": "Presets",
       "lines": [
-        "30 built-in",
+        "57 built-in",
         "presets.",
         "",
         "Highlights:",
